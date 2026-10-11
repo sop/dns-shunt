@@ -40,13 +40,10 @@ impl RuleManager {
     ) -> Result<Self, RuleStoreError> {
         let inputs = match fs::read(&path) {
             Ok(bytes) => serde_json::from_slice::<Vec<RuleInput>>(&bytes)?,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                Vec::new()
-            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
             Err(error) => return Err(error.into()),
         };
-        let rules =
-            config::validate_rules(inputs, &reserved_name, default_ttl)?;
+        let rules = config::validate_rules(inputs, &reserved_name, default_ttl)?;
         Ok(Self {
             path,
             reserved_name,
@@ -77,17 +74,13 @@ impl RuleManager {
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let current = self.snapshot();
         let proposed = change(&current).map_err(RuleStoreError::Update)?;
-        let validated = config::validate_rules(
-            proposed.clone(),
-            &self.reserved_name,
-            self.default_ttl,
-        )?;
+        let validated =
+            config::validate_rules(proposed.clone(), &self.reserved_name, self.default_ttl)?;
         persist(&self.path, &proposed)?;
         *self
             .snapshot
             .write()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()) =
-            validated.clone();
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = validated.clone();
         Ok(validated)
     }
 }
@@ -114,8 +107,7 @@ pub fn default_store_path() -> Result<PathBuf, std::io::Error> {
     let base = std::env::var_os("XDG_DATA_HOME")
         .map(PathBuf::from)
         .or_else(|| {
-            std::env::var_os("HOME")
-                .map(|home| PathBuf::from(home).join(".local").join("share"))
+            std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".local").join("share"))
         })
         .ok_or_else(|| {
             std::io::Error::new(
@@ -136,16 +128,14 @@ fn persist(path: &Path, inputs: &[RuleInput]) -> Result<(), std::io::Error> {
     })?;
     fs::create_dir_all(parent)?;
     let sequence = TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed);
-    let temp_path =
-        parent.join(format!(".rules-{}-{sequence}.tmp", std::process::id()));
+    let temp_path = parent.join(format!(".rules-{}-{sequence}.tmp", std::process::id()));
     let result = (|| {
         let mut file = OpenOptions::new()
             .write(true)
             .create_new(true)
             .open(&temp_path)?;
-        serde_json::to_writer_pretty(&mut file, inputs).map_err(|error| {
-            std::io::Error::new(std::io::ErrorKind::InvalidData, error)
-        })?;
+        serde_json::to_writer_pretty(&mut file, inputs)
+            .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
         file.write_all(b"\n")?;
         file.sync_all()?;
         drop(file);
@@ -168,8 +158,7 @@ fn replace_file(temp: &Path, destination: &Path) -> std::io::Result<()> {
     use windows_sys::Win32::Storage::FileSystem::{
         MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW,
     };
-    let temp: Vec<u16> =
-        temp.as_os_str().encode_wide().chain(Some(0)).collect();
+    let temp: Vec<u16> = temp.as_os_str().encode_wide().chain(Some(0)).collect();
     let destination: Vec<u16> = destination
         .as_os_str()
         .encode_wide()
@@ -215,9 +204,7 @@ mod tests {
     #[test]
     fn loads_missing_store_and_atomically_replaces_complete_rule_sets() {
         let path = test_path();
-        let manager =
-            RuleManager::load(path.clone(), "dns-shunt.local".into(), 60)
-                .unwrap();
+        let manager = RuleManager::load(path.clone(), "dns-shunt.local".into(), 60).unwrap();
         assert!(manager.snapshot().is_empty());
         manager
             .transact(|_| Ok(vec![input("one.example", "192.0.2.1")]))
@@ -225,9 +212,7 @@ mod tests {
         manager
             .transact(|_| Ok(vec![input("two.example", "192.0.2.2")]))
             .unwrap();
-        let reopened =
-            RuleManager::load(path.clone(), "dns-shunt.local".into(), 60)
-                .unwrap();
+        let reopened = RuleManager::load(path.clone(), "dns-shunt.local".into(), 60).unwrap();
         assert_eq!(reopened.snapshot()[0].name, "two.example");
         assert!(!fs::read_to_string(&path).unwrap().contains("query"));
         let _ = fs::remove_dir_all(path.parent().unwrap());
@@ -238,14 +223,9 @@ mod tests {
         let path = test_path();
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         fs::write(&path, b"not json").unwrap();
-        assert!(
-            RuleManager::load(path.clone(), "dns-shunt.local".into(), 60)
-                .is_err()
-        );
+        assert!(RuleManager::load(path.clone(), "dns-shunt.local".into(), 60).is_err());
         fs::remove_file(&path).unwrap();
-        let manager =
-            RuleManager::load(path.clone(), "dns-shunt.local".into(), 60)
-                .unwrap();
+        let manager = RuleManager::load(path.clone(), "dns-shunt.local".into(), 60).unwrap();
         manager
             .transact(|_| Ok(vec![input("old.example", "192.0.2.1")]))
             .unwrap();

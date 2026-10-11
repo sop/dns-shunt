@@ -41,8 +41,7 @@ pub fn decode_capture(record: &[u8]) -> Result<CapturedDatagram, BackendError> {
         return Err(BackendError("invalid WFP capture framing".into()));
     }
     let source = Ipv4Addr::new(record[24], record[25], record[26], record[27]);
-    let destination =
-        Ipv4Addr::new(record[28], record[29], record[30], record[31]);
+    let destination = Ipv4Addr::new(record[28], record[29], record[30], record[31]);
     let source_port = read_u16(record, 32);
     let destination_port = read_u16(record, 34);
     if destination_port != 53 {
@@ -60,9 +59,7 @@ pub fn decode_capture(record: &[u8]) -> Result<CapturedDatagram, BackendError> {
     })
 }
 
-pub fn encode_resolution(
-    resolution: Resolution<'_>,
-) -> Result<Vec<u8>, BackendError> {
+pub fn encode_resolution(resolution: Resolution<'_>) -> Result<Vec<u8>, BackendError> {
     let (command, token, payload) = match resolution {
         Resolution::Reinject { token } => (1u16, token, &[][..]),
         Resolution::Response { token, payload } => (2u16, token, payload),
@@ -113,8 +110,7 @@ mod tests {
         let total_len = record.len() as u32;
         record[0..4].copy_from_slice(&PROTOCOL_MAGIC.to_le_bytes());
         record[4..6].copy_from_slice(&PROTOCOL_VERSION.to_le_bytes());
-        record[6..8]
-            .copy_from_slice(&(CAPTURE_HEADER_LEN as u16).to_le_bytes());
+        record[6..8].copy_from_slice(&(CAPTURE_HEADER_LEN as u16).to_le_bytes());
         record[8..12].copy_from_slice(&total_len.to_le_bytes());
         record[12..16].copy_from_slice(&(payload.len() as u32).to_le_bytes());
         record[16..24].copy_from_slice(&99u64.to_le_bytes());

@@ -18,6 +18,7 @@ use std::{
 use thiserror::Error;
 
 const MAX_REQUEST_BYTES: usize = 65_536;
+type ErrorCallback = Arc<dyn Fn(&str) + Send + Sync>;
 
 pub struct RuntimeState {
     pub config: Config,
@@ -27,6 +28,8 @@ pub struct RuntimeState {
     stopping: AtomicBool,
     listener_failed: AtomicBool,
     stop_callback: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
+    ready_callback: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
+    error_callback: Mutex<Option<ErrorCallback>>,
     overrides: AtomicU64,
     fail_open: AtomicU64,
     errors: AtomicU64,
@@ -44,11 +47,7 @@ struct EventState {
 }
 
 impl RuntimeState {
-    pub fn new(
-        config: Config,
-        rules: RuleManager,
-        backend: &'static str,
-    ) -> Arc<Self> {
+    pub fn new(config: Config, rules: RuleManager, backend: &'static str) -> Arc<Self> {
         Arc::new(Self {
             config,
             rules,
@@ -57,6 +56,8 @@ impl RuntimeState {
             stopping: AtomicBool::new(false),
             listener_failed: AtomicBool::new(false),
             stop_callback: Mutex::new(None),
+            ready_callback: Mutex::new(None),
+            error_callback: Mutex::new(None),
             overrides: AtomicU64::new(0),
             fail_open: AtomicU64::new(0),
             errors: AtomicU64::new(0),
@@ -75,6 +76,31 @@ impl RuntimeState {
     pub fn set_stop_callback(&self, callback: Arc<dyn Fn() + Send + Sync>) {
         *self
             .stop_callback
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(callback);
+    }
+
+    pub fn set_ready_callback(&self, callback: Arc<dyn Fn() + Send + Sync>) {
+        *self
+            .ready_callback
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(callback);
+    }
+
+    pub fn mark_ready(&self) {
+        let callback = self
+            .ready_callback
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
+        if let Some(callback) = callback {
+            callback();
+        }
+    }
+
+    pub fn set_error_callback(&self, callback: ErrorCallback) {
+        *self
+            .error_callback
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(callback);
     }
@@ -141,6 +167,7 @@ impl RuntimeState {
         self.notify_stats_changed();
     }
     pub fn record_error(&self, error: impl Into<String>) {
+        let error = error.into();
         {
             let _stats = self
                 .stats_lock
@@ -150,10 +177,17 @@ impl RuntimeState {
             *self
                 .last_error
                 .write()
-                .unwrap_or_else(|poisoned| poisoned.into_inner()) =
-                Some(error.into());
+                .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(error.clone());
         }
         self.notify_stats_changed();
+        let callback = self
+            .error_callback
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
+        if let Some(callback) = callback {
+            callback(&error);
+        }
     }
 
     fn notify_stats_changed(&self) {
@@ -264,13 +298,11 @@ pub enum AdminError {
 
 impl AdminServer {
     pub fn bind(runtime: &Arc<RuntimeState>) -> Result<Self, AdminError> {
-        let listener =
-            TcpListener::bind(("127.0.0.1", runtime.config.gui_port)).map_err(
-                |error| AdminError::Bind(runtime.config.gui_port, error),
-            )?;
-        listener.set_nonblocking(true).map_err(|error| {
-            AdminError::Bind(runtime.config.gui_port, error)
-        })?;
+        let listener = TcpListener::bind(("127.0.0.1", runtime.config.gui_port))
+            .map_err(|error| AdminError::Bind(runtime.config.gui_port, error))?;
+        listener
+            .set_nonblocking(true)
+            .map_err(|error| AdminError::Bind(runtime.config.gui_port, error))?;
         let runtime = Arc::clone(runtime);
         let worker_runtime = Arc::clone(&runtime);
         let worker = thread::Builder::new()
@@ -279,38 +311,28 @@ impl AdminServer {
                 while !worker_runtime.is_stopping() {
                     match listener.accept() {
                         Ok((stream, _)) => {
-                            let connection_runtime =
-                                Arc::clone(&worker_runtime);
+                            let connection_runtime = Arc::clone(&worker_runtime);
                             if let Err(error) = thread::Builder::new()
                                 .name("dns-shunt-admin-connection".into())
                                 .spawn(move || {
-                                    if let Err(error) = handle_connection(
-                                        stream,
-                                        &connection_runtime,
-                                    ) {
+                                    if let Err(error) =
+                                        handle_connection(stream, &connection_runtime)
+                                    {
                                         connection_runtime.record_error(error);
                                     }
                                 })
                             {
                                 worker_runtime.record_error(format!(
-                                    concat!(
-                                        "could not start admin ",
-                                        "connection thread: {}"
-                                    ),
+                                    concat!("could not start admin ", "connection thread: {}"),
                                     error
                                 ));
                             }
                         }
-                        Err(error)
-                            if error.kind()
-                                == std::io::ErrorKind::WouldBlock =>
-                        {
+                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                             thread::sleep(Duration::from_millis(20))
                         }
                         Err(error) => {
-                            worker_runtime.record_error(format!(
-                                "admin listener failed: {error}"
-                            ));
+                            worker_runtime.record_error(format!("admin listener failed: {error}"));
                             worker_runtime
                                 .listener_failed
                                 .store(true, Ordering::Release);
@@ -335,10 +357,7 @@ impl AdminServer {
             return Err("admin HTTP thread terminated unexpectedly".into());
         }
         if self.runtime.listener_failed.load(Ordering::Acquire) {
-            return Err(
-                "admin HTTP listener failed; DNS interception was stopped"
-                    .into(),
-            );
+            return Err("admin HTTP listener failed; DNS interception was stopped".into());
         }
         Ok(())
     }
@@ -351,10 +370,7 @@ struct HttpRequest {
     body: Vec<u8>,
 }
 
-fn handle_connection(
-    mut stream: TcpStream,
-    runtime: &Arc<RuntimeState>,
-) -> Result<(), String> {
+fn handle_connection(mut stream: TcpStream, runtime: &Arc<RuntimeState>) -> Result<(), String> {
     // On Windows, accepted sockets inherit the listener's nonblocking mode.
     // Request parsing uses read_exact, so each connection must be blocking.
     stream.set_nonblocking(false).map_err(|e| e.to_string())?;
@@ -396,17 +412,11 @@ fn handle_connection(
         Err((status, error)) => (
             status,
             "application/json",
-            serde_json::to_vec(&json!({"error": error}))
-                .unwrap_or_else(|_| b"{}".to_vec()),
+            serde_json::to_vec(&json!({"error": error})).unwrap_or_else(|_| b"{}".to_vec()),
         ),
     };
     if request.method == "HEAD" && request.path == "/" {
-        return send_response(
-            &mut stream,
-            200,
-            b"",
-            "text/html; charset=utf-8",
-        );
+        return send_response(&mut stream, 200, b"", "text/html; charset=utf-8");
     }
     if request.method == "GET" && request.path == "/" {
         return send_response(
@@ -476,15 +486,11 @@ fn serve_events(stream: &mut TcpStream, runtime: &RuntimeState) {
         if runtime.is_stopping() {
             return;
         }
-        if stats_changed
-            && send_sse_event(stream, "stats", &runtime.statistics_snapshot())
-                .is_err()
+        if stats_changed && send_sse_event(stream, "stats", &runtime.statistics_snapshot()).is_err()
         {
             return;
         }
-        if rules_changed
-            && send_sse_event(stream, "rules-changed", &json!({})).is_err()
-        {
+        if rules_changed && send_sse_event(stream, "rules-changed", &json!({})).is_err() {
             return;
         }
         if !stats_changed
@@ -499,11 +505,7 @@ fn serve_events(stream: &mut TcpStream, runtime: &RuntimeState) {
     }
 }
 
-fn send_sse_event(
-    stream: &mut TcpStream,
-    name: &str,
-    data: &Value,
-) -> std::io::Result<()> {
+fn send_sse_event(stream: &mut TcpStream, name: &str, data: &Value) -> std::io::Result<()> {
     let data = serde_json::to_string(data).unwrap_or_else(|_| "{}".into());
     write!(stream, "event: {name}\ndata: {data}\n\n")?;
     stream.flush()
@@ -524,8 +526,7 @@ fn read_request(stream: &mut TcpStream) -> Result<HttpRequest, String> {
     if !headers.ends_with(b"\r\n\r\n") {
         return Err("HTTP headers exceed 16 KiB".into());
     }
-    let header_text = std::str::from_utf8(&headers)
-        .map_err(|_| "HTTP headers are not UTF-8")?;
+    let header_text = std::str::from_utf8(&headers).map_err(|_| "HTTP headers are not UTF-8")?;
     let mut lines = header_text.split("\r\n");
     let mut request_line = lines
         .next()
@@ -538,10 +539,8 @@ fn read_request(stream: &mut TcpStream) -> Result<HttpRequest, String> {
     }
     let mut parsed_headers = HashMap::new();
     for line in lines.filter(|line| !line.is_empty()) {
-        let (name, value) =
-            line.split_once(':').ok_or("malformed HTTP header")?;
-        parsed_headers
-            .insert(name.trim().to_ascii_lowercase(), value.trim().to_owned());
+        let (name, value) = line.split_once(':').ok_or("malformed HTTP header")?;
+        parsed_headers.insert(name.trim().to_ascii_lowercase(), value.trim().to_owned());
     }
     let length = parsed_headers
         .get("content-length")
@@ -581,10 +580,7 @@ struct ReorderInput {
     to: usize,
 }
 
-fn route(
-    request: &HttpRequest,
-    runtime: &RuntimeState,
-) -> Result<(u16, Value), (u16, String)> {
+fn route(request: &HttpRequest, runtime: &RuntimeState) -> Result<(u16, Value), (u16, String)> {
     match (request.method.as_str(), request.path.as_str()) {
         ("GET", "/api/status") => Ok((200, runtime.status())),
         ("GET", "/api/rules") => Ok((200, runtime.rules_json())),
@@ -593,10 +589,7 @@ fn route(
             let result = runtime
                 .rules
                 .transact(|current| {
-                    let mut next = current
-                        .iter()
-                        .map(config::rule_input)
-                        .collect::<Vec<_>>();
+                    let mut next = current.iter().map(config::rule_input).collect::<Vec<_>>();
                     next.push(input);
                     Ok(next)
                 })
@@ -609,14 +602,10 @@ fn route(
             let result = runtime
                 .rules
                 .transact(|current| {
-                    if input.from >= current.len() || input.to >= current.len()
-                    {
+                    if input.from >= current.len() || input.to >= current.len() {
                         return Err("rule index is out of range".into());
                     }
-                    let mut next = current
-                        .iter()
-                        .map(config::rule_input)
-                        .collect::<Vec<_>>();
+                    let mut next = current.iter().map(config::rule_input).collect::<Vec<_>>();
                     let rule = next.remove(input.from);
                     next.insert(input.to, rule);
                     Ok(next)
@@ -633,10 +622,7 @@ fn route(
                     if input.index >= current.len() {
                         return Err("rule index is out of range".into());
                     }
-                    let mut next = current
-                        .iter()
-                        .map(config::rule_input)
-                        .collect::<Vec<_>>();
+                    let mut next = current.iter().map(config::rule_input).collect::<Vec<_>>();
                     next[input.index] = config::RuleInput {
                         name: input.name,
                         address: input.address,
@@ -659,10 +645,7 @@ fn route(
                     if index >= current.len() {
                         return Err("rule index is out of range".into());
                     }
-                    let mut next = current
-                        .iter()
-                        .map(config::rule_input)
-                        .collect::<Vec<_>>();
+                    let mut next = current.iter().map(config::rule_input).collect::<Vec<_>>();
                     next.remove(index);
                     Ok(next)
                 })
@@ -674,11 +657,8 @@ fn route(
     }
 }
 
-fn parse_json<T: for<'de> Deserialize<'de>>(
-    body: &[u8],
-) -> Result<T, (u16, String)> {
-    serde_json::from_slice(body)
-        .map_err(|error| (400, format!("invalid JSON: {error}")))
+fn parse_json<T: for<'de> Deserialize<'de>>(body: &[u8]) -> Result<T, (u16, String)> {
+    serde_json::from_slice(body).map_err(|error| (400, format!("invalid JSON: {error}")))
 }
 
 fn store_error(error: RuleStoreError) -> (u16, String) {
@@ -713,10 +693,7 @@ fn origin_allowed(origin: &str, runtime: &RuntimeState) -> bool {
         .any(|host| origin.eq_ignore_ascii_case(&format!("http://{host}")))
 }
 
-fn authorize(
-    request: &HttpRequest,
-    runtime: &RuntimeState,
-) -> Result<(), (u16, &'static str)> {
+fn authorize(request: &HttpRequest, runtime: &RuntimeState) -> Result<(), (u16, &'static str)> {
     if !host_allowed(
         request
             .headers
@@ -793,8 +770,7 @@ mod tests {
     };
 
     fn runtime() -> Arc<RuntimeState> {
-        let config =
-            Config::parse("upstream=\"1.1.1.1\"\nsource_port=53053\n").unwrap();
+        let config = Config::parse("upstream=\"1.1.1.1\"\nsource_port=53053\n").unwrap();
         let nonce = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
@@ -804,8 +780,7 @@ mod tests {
             .join("rules.json");
         RuntimeState::new(
             config.clone(),
-            RuleManager::load(path, config.gui_name.clone(), config.ttl)
-                .unwrap(),
+            RuleManager::load(path, config.gui_name.clone(), config.ttl).unwrap(),
             "WinDivert",
         )
     }
@@ -820,11 +795,39 @@ mod tests {
     }
 
     #[test]
+    fn stop_signaling_runs_the_backend_wakeup_callback() {
+        let state = runtime();
+        let callbacks = Arc::new(AtomicU64::new(0));
+        let callback_count = Arc::clone(&callbacks);
+        state.set_stop_callback(Arc::new(move || {
+            callback_count.fetch_add(1, Ordering::Relaxed);
+        }));
+
+        state.stop();
+
+        assert!(state.is_stopping());
+        assert_eq!(callbacks.load(Ordering::Relaxed), 1);
+    }
+
+    fn connection_response(runtime: &Arc<RuntimeState>, request: &str) -> Vec<u8> {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let mut client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        client
+            .set_read_timeout(Some(Duration::from_secs(3)))
+            .unwrap();
+        client.write_all(request.as_bytes()).unwrap();
+        let (stream, _) = listener.accept().unwrap();
+        handle_connection(stream, runtime).unwrap();
+        let mut response = Vec::new();
+        client.read_to_end(&mut response).unwrap();
+        response
+    }
+
+    #[test]
     fn handles_headers_that_arrive_after_accept_on_a_nonblocking_stream() {
         let runtime = runtime();
         let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
-        let mut client =
-            TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let mut client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
         let (stream, _) = listener.accept().unwrap();
         stream.set_nonblocking(true).unwrap();
         client
@@ -850,10 +853,115 @@ mod tests {
     }
 
     #[test]
+    fn unauthenticated_connections_can_read_dashboard_data_and_mutate_rules() {
+        let state = runtime();
+        state
+            .rules
+            .transact(|_| {
+                Ok(vec![config::RuleInput {
+                    name: "secret.example".into(),
+                    address: "192.0.2.55".into(),
+                    ttl: None,
+                }])
+            })
+            .unwrap();
+        let port = state.config.gui_port;
+        let dashboard = connection_response(
+            &state,
+            &format!("GET / HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n\r\n"),
+        );
+        assert!(dashboard.starts_with(b"HTTP/1.1 200 OK\r\n"));
+
+        let status = connection_response(
+            &state,
+            &format!("GET /api/status HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n\r\n"),
+        );
+        assert!(status.starts_with(b"HTTP/1.1 200 OK\r\n"));
+        assert!(
+            status
+                .windows(b"\"service\":\"running\"".len())
+                .any(|window| { window == b"\"service\":\"running\"" })
+        );
+
+        let rules = connection_response(
+            &state,
+            &format!("GET /api/rules HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n\r\n"),
+        );
+        assert!(rules.starts_with(b"HTTP/1.1 200 OK\r\n"));
+        assert!(
+            rules
+                .windows(b"secret.example".len())
+                .any(|window| { window == b"secret.example" })
+        );
+
+        let body = r#"{"name":"blocked.example","address":"192.0.2.9"}"#;
+        let response = connection_response(
+            &state,
+            &format!(
+                concat!(
+                    "POST /api/rules HTTP/1.1\r\n",
+                    "Host: 127.0.0.1:{}\r\n",
+                    "Origin: http://127.0.0.1:{}\r\n",
+                    "Content-Length: {}\r\n\r\n{}"
+                ),
+                port,
+                port,
+                body.len(),
+                body
+            ),
+        );
+        assert!(response.starts_with(b"HTTP/1.1 201 Created\r\n"));
+        assert!(state.rules.snapshot().iter().any(|rule| {
+            rule.name == "blocked.example" && rule.address.to_string() == "192.0.2.9"
+        }));
+        assert!(
+            !response
+                .windows(b"WWW-Authenticate".len())
+                .any(|window| { window == b"WWW-Authenticate" })
+        );
+    }
+
+    #[test]
     fn enforces_host_origin_and_validates_rule_crud() {
         let runtime = runtime();
         let allowed_host = format!("127.0.0.1:{}", runtime.config.gui_port);
         let allowed_origin = format!("http://{allowed_host}");
+        let denied_host = connection_response(
+            &runtime,
+            &format!(
+                "GET /api/status HTTP/1.1\r\nHost: evil.example:{}\r\n\r\n",
+                runtime.config.gui_port
+            ),
+        );
+        assert!(denied_host.starts_with(b"HTTP/1.1 403 Forbidden\r\n"));
+
+        let missing_origin = connection_response(
+            &runtime,
+            &format!(
+                concat!(
+                    "POST /api/rules HTTP/1.1\r\n",
+                    "Host: {}\r\n",
+                    "Content-Length: 2\r\n\r\n{{}}"
+                ),
+                allowed_host
+            ),
+        );
+        assert!(missing_origin.starts_with(b"HTTP/1.1 403 Forbidden\r\n"));
+
+        let invalid_origin = connection_response(
+            &runtime,
+            &format!(
+                concat!(
+                    "POST /api/rules HTTP/1.1\r\n",
+                    "Host: {}\r\n",
+                    "Origin: https://{}\r\n",
+                    "Content-Length: 2\r\n\r\n{{}}"
+                ),
+                allowed_host, allowed_host
+            ),
+        );
+        assert!(invalid_origin.starts_with(b"HTTP/1.1 403 Forbidden\r\n"));
+
         let mut secured = request("POST", "/api/rules", "{}");
         secured.headers.insert("host".into(), allowed_host.clone());
         assert_eq!(
@@ -1079,9 +1187,7 @@ mod tests {
             ("second.example", "192.0.2.2"),
         ] {
             let body = format!(r#"{{"name":"{name}","address":"{address}"}}"#);
-            assert!(
-                route(&request("POST", "/api/rules", &body), &state).is_ok()
-            );
+            assert!(route(&request("POST", "/api/rules", &body), &state).is_ok());
         }
 
         assert!(
@@ -1127,8 +1233,7 @@ mod tests {
     fn sse_stream_delivers_snapshots_rule_changes_and_stops_cleanly() {
         let state = runtime();
         let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
-        let mut client =
-            TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let mut client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
         client
             .set_read_timeout(Some(Duration::from_secs(3)))
             .unwrap();
@@ -1140,33 +1245,24 @@ mod tests {
         .unwrap();
         let (stream, _) = listener.accept().unwrap();
         let connection_state = Arc::clone(&state);
-        let worker =
-            thread::spawn(move || handle_connection(stream, &connection_state));
+        let worker = thread::spawn(move || handle_connection(stream, &connection_state));
 
-        let headers =
-            String::from_utf8(read_until(&mut client, b"\r\n\r\n")).unwrap();
+        let headers = String::from_utf8(read_until(&mut client, b"\r\n\r\n")).unwrap();
         assert!(headers.starts_with("HTTP/1.1 200 OK\r\n"));
-        assert!(
-            headers
-                .contains("Content-Type: text/event-stream; charset=utf-8\r\n")
-        );
+        assert!(headers.contains("Content-Type: text/event-stream; charset=utf-8\r\n"));
         assert!(headers.contains("Cache-Control: no-cache\r\n"));
         assert!(headers.contains("Connection: keep-alive\r\n"));
         assert!(!headers.to_ascii_lowercase().contains("content-length:"));
+        assert!(!headers.to_ascii_lowercase().contains("www-authenticate:"));
 
-        let initial_stats =
-            String::from_utf8(read_until(&mut client, b"\n\n")).unwrap();
+        let initial_stats = String::from_utf8(read_until(&mut client, b"\n\n")).unwrap();
         assert!(initial_stats.starts_with("event: stats\n"));
         let data = initial_stats
             .lines()
             .find_map(|line| line.strip_prefix("data: "))
             .unwrap();
-        assert_eq!(
-            serde_json::from_str::<Value>(data).unwrap()["overrides"],
-            0
-        );
-        let initial_rules =
-            String::from_utf8(read_until(&mut client, b"\n\n")).unwrap();
+        assert_eq!(serde_json::from_str::<Value>(data).unwrap()["overrides"], 0);
+        let initial_rules = String::from_utf8(read_until(&mut client, b"\n\n")).unwrap();
         assert!(initial_rules.starts_with("event: rules-changed\n"));
 
         let rule = config::validate_rules(
@@ -1181,8 +1277,7 @@ mod tests {
         .unwrap()
         .remove(0);
         state.record_override(&rule);
-        let stats =
-            String::from_utf8(read_until(&mut client, b"\n\n")).unwrap();
+        let stats = String::from_utf8(read_until(&mut client, b"\n\n")).unwrap();
         assert!(stats.starts_with("event: stats\n"));
         let data = stats
             .lines()
@@ -1203,8 +1298,7 @@ mod tests {
             )
             .is_ok()
         );
-        let changed =
-            String::from_utf8(read_until(&mut client, b"\n\n")).unwrap();
+        let changed = String::from_utf8(read_until(&mut client, b"\n\n")).unwrap();
         assert!(changed.starts_with("event: rules-changed\n"));
 
         state.stop();

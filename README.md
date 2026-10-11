@@ -1,6 +1,6 @@
 # dns-shunt
 
-`dns-shunt` is a foreground Windows DNS override prototype. It synthesizes answers only for matching A/IN records managed through a local web interface. All other DNS packets are passed through unchanged to the resolver Windows selected; the application does not select, configure, or proxy to a resolver. It does not change adapter DNS settings. Capture and the web interface are opt-in; without `--run`, the program only validates TOML configuration. WinDivert is the default interception backend; the experimental WFP backend remains available through explicit selection.
+`dns-shunt` is a Windows DNS override prototype with both foreground and Windows service modes. It synthesizes answers only for matching A/IN records managed through a local web interface. All other DNS packets are passed through unchanged to the resolver Windows selected; the application does not select, configure, or proxy to a resolver. It does not change adapter DNS settings. Capture is opt-in: foreground capture requires `--run`, while installing the automatic-start service is the machine-wide opt-in. WinDivert is the default interception backend; the experimental WFP backend remains available only through explicit foreground selection.
 
 Both backends inspect only outbound, non-loopback IPv4 UDP DNS packets to port 53. IPv6, TCP/53, inbound DNS, and loopback traffic are outside the interception scope.
 
@@ -11,6 +11,7 @@ The WFP backend is experimental kernel-driver code. It has not been independentl
 - Rust stable with the MSVC toolchain for native Windows builds.
 - Windows 10/11 x64 to run packet interception.
 - Administrator privileges to start interception.
+- Elevated PowerShell to install or uninstall the Windows service.
 - The signed WinDivert runtime assets installed by `install-windivert.ps1` for the default backend.
 - For WFP development: Visual Studio or Build Tools with MSBuild and the Windows Driver Kit (WDK).
 - A disposable test VM with the required test-driver signing configuration to load a locally built WFP driver. Secure Boot and system policy may prevent test drivers from loading.
@@ -71,9 +72,50 @@ Install the WinDivert runtime assets once, then run the default backend:
 cargo run -- --config .\dns-shunt.example.toml --run
 ```
 
-With `--run`, the dashboard is available at `http://dns-shunt.local:53080` by default (or the configured `gui_name` and `gui_port`). The listener binds only to IPv4 loopback and must be accessed using an allowed local Host/Origin. It has no login and must not be exposed beyond the local machine. The configured `gui_name` resolves to loopback through intercepted DNS as well; use `http://127.0.0.1:53080` if DNS-over-HTTPS or another DNS path bypasses interception. A port conflict prevents capture from starting.
+With `--run`, the unauthenticated dashboard is available at
+`http://dns-shunt.local:53080` by default (or the configured `gui_name` and
+`gui_port`). The listener binds only to IPv4 loopback and retains Host
+validation and same-origin checks for rule changes. Any local user or process
+can view dashboard data and add, edit, reorder, or delete rules; do not expose
+the listener beyond the local machine. The configured `gui_name` resolves to
+loopback through intercepted DNS as well; use
+`http://127.0.0.1:53080` if DNS-over-HTTPS or another DNS path bypasses
+interception. A port conflict prevents capture from starting.
 
-User rules are stored as human-readable JSON in `%APPDATA%\dns-shunt\rules.json` on Windows. The browser can add, edit, and delete rules immediately; exact names precede wildcards, and wildcards match subdomains but not their apex. Only matching A/IN queries receive synthesized responses. Nonmatching names, AAAA queries, other classes, malformed DNS, and unsupported messages are immediately reinjected unchanged; unmatched traffic is neither correlated nor counted. The JSON store is validated in full before it is persisted and published. Corrupt or unreadable stores fail startup rather than silently disabling overrides. Aggregate override, fail-open, and error counters, uptime, and per-rule hit counts cover only the current run and are not written to disk; individual query names are never retained. TTL, GUI name, and HTTP port remain read-only TOML settings.
+Foreground user rules are stored as human-readable JSON in `%APPDATA%\dns-shunt\rules.json` on Windows. The service instead uses the shared `%ProgramData%\dns-shunt\rules.json` and `%ProgramData%\dns-shunt\config.toml` files. The browser can add, edit, and delete rules immediately; exact names precede wildcards, and wildcards match subdomains but not their apex. Only matching A/IN queries receive synthesized responses. Nonmatching names, AAAA queries, other classes, malformed DNS, and unsupported messages are immediately reinjected unchanged; unmatched traffic is neither correlated nor counted. The JSON store is validated in full before it is persisted and published. Corrupt or unreadable stores fail startup rather than silently disabling overrides. Aggregate override, fail-open, and error counters, uptime, and per-rule hit counts cover only the current run and are not written to disk; individual query names are never retained. TTL, GUI name, and HTTP port remain read-only TOML settings.
+
+## Windows Service
+
+The service runs one machine-wide capture process as `LocalSystem`; it starts at boot without a user session. Installing it from an elevated PowerShell session is the administrator's explicit opt-in. It uses WinDivert and the fixed ProgramData config/rules paths; the experimental WFP backend is not selected in service mode.
+
+Build the release executable and install the service from an elevated PowerShell at the repository root:
+
+```powershell
+cargo build --release
+.\install-service.ps1
+```
+
+The installer stages the executable and signed WinDivert runtime assets under `%ProgramFiles%\dns-shunt`, creates `%ProgramData%\dns-shunt` with write access for SYSTEM and Administrators, seeds `config.toml` from the example only when absent, validates it, and creates/starts an automatic `LocalSystem` service. Check status and startup diagnostics with:
+
+```powershell
+Get-Service DnsShunt
+Get-WinEvent -FilterHashtable @{ LogName = 'Application'; ProviderName = 'Dns-Shunt' }
+```
+
+The dashboard remains unauthenticated and loopback-only as described above.
+Any local user or process can view status/rules or make changes; service-mode
+rule changes affect all users on the computer because the TOML and JSON rule
+files are shared under `%ProgramData%`. The service does not modify adapter
+DNS settings or Windows resolver selection.
+
+Stop the service through SCM, or uninstall it from an elevated PowerShell:
+
+```powershell
+Stop-Service DnsShunt
+.\uninstall-service.ps1
+```
+
+Uninstall stops/deletes the service and removes its installed binaries. It preserves `%ProgramData%\dns-shunt` configuration and rules by default. Confirm ordinary DNS resumes after stopping the service. Rust tests and service lifecycle checks do not establish WFP driver safety.
 
 WinDivert can also be selected explicitly. The experimental WFP backend remains available with `--backend wfp`:
 

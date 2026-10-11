@@ -1,7 +1,5 @@
 use crate::{
-    backend::{
-        self, BackendError, CapturedPacket, FlowContext, InterceptionBackend,
-    },
+    backend::{self, BackendError, CapturedPacket, FlowContext, InterceptionBackend},
     config::Config,
     packet,
 };
@@ -13,13 +11,10 @@ use std::{
         atomic::{AtomicBool, Ordering},
     },
 };
-use windivert::{
-    address::WinDivertAddress, layer::NetworkLayer, packet::WinDivertPacket,
-};
+use windivert::{address::WinDivertAddress, layer::NetworkLayer, packet::WinDivertPacket};
 use windivert_sys::{
-    ChecksumFlags, WinDivertClose, WinDivertFlags, WinDivertLayer,
-    WinDivertOpen, WinDivertRecv, WinDivertSend, WinDivertShutdown,
-    WinDivertShutdownMode,
+    ChecksumFlags, WinDivertClose, WinDivertFlags, WinDivertLayer, WinDivertOpen, WinDivertRecv,
+    WinDivertSend, WinDivertShutdown, WinDivertShutdownMode,
 };
 use windows::Win32::Foundation::HANDLE;
 
@@ -90,10 +85,7 @@ impl WinDivertDriver {
         Ok((received as usize, address))
     }
 
-    fn send(
-        &self,
-        packet: &WinDivertPacket<NetworkLayer>,
-    ) -> Result<(), io::Error> {
+    fn send(&self, packet: &WinDivertPacket<NetworkLayer>) -> Result<(), io::Error> {
         let mut sent = 0;
         let result = unsafe {
             WinDivertSend(
@@ -111,9 +103,7 @@ impl WinDivertDriver {
     }
 
     fn shutdown_receive(&self) -> Result<(), io::Error> {
-        let result = unsafe {
-            WinDivertShutdown(self.handle, WinDivertShutdownMode::Recv)
-        };
+        let result = unsafe { WinDivertShutdown(self.handle, WinDivertShutdownMode::Recv) };
         if !result.as_bool() {
             return Err(io::Error::last_os_error());
         }
@@ -139,16 +129,12 @@ impl InterceptionBackend for WinDivertBackend {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let buffer_capacity = receive_buffer.len();
-        let (packet_length, address) =
-            self.driver.recv(&mut receive_buffer).map_err(|error| {
-                BackendError(format!(
-                    concat!(
-                        "WinDivert receive failed with a ",
-                        "{}-byte buffer: {}"
-                    ),
-                    buffer_capacity, error
-                ))
-            })?;
+        let (packet_length, address) = self.driver.recv(&mut receive_buffer).map_err(|error| {
+            BackendError(format!(
+                concat!("WinDivert receive failed with a ", "{}-byte buffer: {}"),
+                buffer_capacity, error
+            ))
+        })?;
         let bytes = receive_buffer[..packet_length].to_vec();
         let (tuple, dns_payload) = match packet::parse_ipv4_udp(&bytes) {
             Ok((tuple, payload)) if tuple.destination_port == 53 => {
@@ -177,15 +163,13 @@ impl InterceptionBackend for WinDivertBackend {
         dns_payload: &[u8],
     ) -> Result<(), BackendError> {
         let captured = validated_context(context)?;
-        let tuple = context.tuple.ok_or_else(|| {
-            BackendError("response context has no IPv4/UDP tuple".into())
-        })?;
-        let response =
-            packet::build_ipv4_udp(packet::response_tuple(tuple), dns_payload)
-                .map_err(|error| BackendError(error.to_string()))?;
+        let tuple = context
+            .tuple
+            .ok_or_else(|| BackendError("response context has no IPv4/UDP tuple".into()))?;
+        let response = packet::build_ipv4_udp(packet::response_tuple(tuple), dns_payload)
+            .map_err(|error| BackendError(error.to_string()))?;
         let mut terminal = begin_terminal(&captured.terminal)?;
-        let mut injected =
-            unsafe { WinDivertPacket::<NetworkLayer>::new(response) };
+        let mut injected = unsafe { WinDivertPacket::<NetworkLayer>::new(response) };
         injected.address = captured.address.clone();
         injected.address.set_outbound(false);
         injected.address.set_impostor(true);
@@ -199,17 +183,11 @@ impl InterceptionBackend for WinDivertBackend {
         Ok(())
     }
 
-    fn reinject_original(
-        &self,
-        context: &FlowContext,
-    ) -> Result<(), BackendError> {
+    fn reinject_original(&self, context: &FlowContext) -> Result<(), BackendError> {
         let captured = validated_context(context)?;
         let mut terminal = begin_terminal(&captured.terminal)?;
-        let mut packet = unsafe {
-            WinDivertPacket::<NetworkLayer>::new(
-                captured.original_packet.clone(),
-            )
-        };
+        let mut packet =
+            unsafe { WinDivertPacket::<NetworkLayer>::new(captured.original_packet.clone()) };
         packet.address = captured.address.clone();
         self.driver
             .send(&packet)
@@ -218,25 +196,21 @@ impl InterceptionBackend for WinDivertBackend {
         Ok(())
     }
 
-    fn request_shutdown(&self) {
+    fn request_shutdown(&self) -> Result<(), BackendError> {
         if self.shutdown_requested.swap(true, Ordering::AcqRel) {
-            return;
+            return Ok(());
         }
-        if let Err(error) = self.driver.shutdown_receive() {
-            eprintln!("could not shut down WinDivert receive: {error}");
-        }
+        self.driver.shutdown_receive().map_err(|error| {
+            BackendError(format!("could not shut down WinDivert receive: {error}"))
+        })
     }
 }
 
-fn validated_context(
-    context: &FlowContext,
-) -> Result<&CapturedAddress, BackendError> {
+fn validated_context(context: &FlowContext) -> Result<&CapturedAddress, BackendError> {
     let captured = context
         .backend_context
         .downcast_ref::<CapturedAddress>()
-        .ok_or_else(|| {
-            BackendError("invalid WinDivert packet context".into())
-        })?;
+        .ok_or_else(|| BackendError("invalid WinDivert packet context".into()))?;
     if context.tuple != captured.tuple {
         return Err(BackendError(
             "WinDivert packet tuple does not match context".into(),
@@ -245,9 +219,7 @@ fn validated_context(
     Ok(captured)
 }
 
-fn begin_terminal(
-    terminal: &Mutex<bool>,
-) -> Result<MutexGuard<'_, bool>, BackendError> {
+fn begin_terminal(terminal: &Mutex<bool>) -> Result<MutexGuard<'_, bool>, BackendError> {
     let state = terminal
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -262,9 +234,12 @@ fn begin_terminal(
 pub fn run(
     config: Config,
     runtime: Arc<crate::admin::RuntimeState>,
+    console_mode: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let driver = WinDivertDriver::open(WIN_DIVERT_FILTER)?;
-    println!("WinDivert capture active; Ctrl+C stops the foreground prototype");
+    if console_mode {
+        println!("WinDivert capture active; Ctrl+C stops the foreground prototype");
+    }
     backend::run_proxy(
         Arc::new(WinDivertBackend {
             driver,
@@ -273,6 +248,7 @@ pub fn run(
         }),
         config,
         runtime,
+        console_mode,
     )
 }
 

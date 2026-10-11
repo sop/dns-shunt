@@ -328,7 +328,7 @@
         </div>
         <div class="card">
           <div class="label">Uptime</div>
-          <div class="value" id="uptime">0<span class="unit">s</span></div>
+          <div class="value" id="uptime">Indeterminate</div>
         </div>
       </div>
 
@@ -387,6 +387,7 @@
       let backend = '';
       let uptimeBaseline = 0;
       let uptimeStartedAt = 0;
+      let dashboardConnected = false;
 
       function esc(value) {
         return String(value).replace(/[&<>"']/g, character => ({
@@ -420,6 +421,11 @@
       }
 
       function renderUptime() {
+        if (!dashboardConnected) {
+          $('uptime').textContent = 'Indeterminate';
+          return;
+        }
+
         const uptime = Math.floor(
           uptimeBaseline + (performance.now() - uptimeStartedAt) / 1000
         );
@@ -504,6 +510,7 @@
           ]);
 
           backend = status.backend;
+          dashboardConnected = true;
           $('service').textContent =
             status.service.toUpperCase() + ' · ' + backend;
           uptimeBaseline = status.uptime_seconds;
@@ -523,6 +530,8 @@
 
           renderRules(rules);
         } catch (error) {
+          dashboardConnected = false;
+          renderUptime();
           $('service').textContent = 'OFFLINE';
           showError(error);
         }
@@ -617,11 +626,27 @@
           renderStatistics(JSON.parse(event.data))
         );
         events.addEventListener('rules-changed', loadRules);
-        events.onopen = () => {
-          $('service').textContent =
-            backend ? 'RUNNING · ' + backend : 'RUNNING';
+        events.onopen = async () => {
+          try {
+            const status = await api('/api/status');
+            if (events.readyState !== EventSource.OPEN) return;
+
+            backend = status.backend;
+            uptimeBaseline = status.uptime_seconds;
+            uptimeStartedAt = performance.now();
+            dashboardConnected = true;
+            renderUptime();
+            $('service').textContent =
+              backend ? 'RUNNING · ' + backend : 'RUNNING';
+          } catch (error) {
+            dashboardConnected = false;
+            renderUptime();
+            showError(error);
+          }
         };
         events.onerror = () => {
+          dashboardConnected = false;
+          renderUptime();
           $('service').textContent =
             backend ? 'RECONNECTING · ' + backend : 'RECONNECTING';
         };

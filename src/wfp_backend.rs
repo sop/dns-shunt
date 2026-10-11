@@ -1,7 +1,5 @@
 use crate::{
-    backend::{
-        self, BackendError, CapturedPacket, FlowContext, InterceptionBackend,
-    },
+    backend::{self, BackendError, CapturedPacket, FlowContext, InterceptionBackend},
     config::Config,
     wfp_protocol::{self, Resolution},
 };
@@ -15,23 +13,19 @@ use std::{
 use windows_sys::{
     Win32::{
         Foundation::{
-            CloseHandle, ERROR_IO_PENDING, GetLastError, HANDLE,
-            INVALID_HANDLE_VALUE, WAIT_OBJECT_0,
+            CloseHandle, ERROR_IO_PENDING, GetLastError, HANDLE, INVALID_HANDLE_VALUE,
+            WAIT_OBJECT_0,
         },
         NetworkManagement::WindowsFilteringPlatform::*,
         Storage::FileSystem::{
-            CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_FLAG_OVERLAPPED,
-            OPEN_EXISTING, ReadFile,
+            CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_FLAG_OVERLAPPED, OPEN_EXISTING, ReadFile,
         },
         System::{
-            IO::{
-                CancelIoEx, DeviceIoControl, GetOverlappedResult, OVERLAPPED,
-            },
+            IO::{CancelIoEx, DeviceIoControl, GetOverlappedResult, OVERLAPPED},
             Services::{
-                CloseServiceHandle, ControlService, OpenSCManagerW,
-                OpenServiceW, QueryServiceStatus, SC_MANAGER_CONNECT,
-                SERVICE_QUERY_STATUS, SERVICE_RUNNING, SERVICE_START,
-                SERVICE_STATUS, SERVICE_STOP, StartServiceW,
+                CloseServiceHandle, ControlService, OpenSCManagerW, OpenServiceW,
+                QueryServiceStatus, SC_MANAGER_CONNECT, SERVICE_QUERY_STATUS, SERVICE_RUNNING,
+                SERVICE_START, SERVICE_STATUS, SERVICE_STOP, StartServiceW,
             },
             Threading::{CreateEventW, INFINITE, WaitForSingleObject},
         },
@@ -71,14 +65,10 @@ const SERVICE_NAME: &[u16] = &[
     b'p' as u16,
     0,
 ];
-const PROVIDER_KEY: GUID =
-    GUID::from_u128(0x0a4e_628f_253c_4a12_a85a_670c_87de_4121);
-const SUBLAYER_KEY: GUID =
-    GUID::from_u128(0x5bdd_152c_6c8d_480c_b66e_d40a_8b51_b729);
-const CALLOUT_KEY: GUID =
-    GUID::from_u128(0xa232_e608_8a6f_4bb9_9037_25df_abf5_176a);
-const FILTER_KEY: GUID =
-    GUID::from_u128(0x7c6a_7814_1106_41df_8d70_868a_2c4d_859b);
+const PROVIDER_KEY: GUID = GUID::from_u128(0x0a4e_628f_253c_4a12_a85a_670c_87de_4121);
+const SUBLAYER_KEY: GUID = GUID::from_u128(0x5bdd_152c_6c8d_480c_b66e_d40a_8b51_b729);
+const CALLOUT_KEY: GUID = GUID::from_u128(0xa232_e608_8a6f_4bb9_9037_25df_abf5_176a);
+const FILTER_KEY: GUID = GUID::from_u128(0x7c6a_7814_1106_41df_8d70_868a_2c4d_859b);
 
 struct WfpSession(HANDLE);
 
@@ -90,15 +80,7 @@ impl WfpSession {
         };
         let mut engine = ptr::null_mut();
         check_status(
-            unsafe {
-                FwpmEngineOpen0(
-                    ptr::null(),
-                    10,
-                    ptr::null(),
-                    &session,
-                    &mut engine,
-                )
-            },
+            unsafe { FwpmEngineOpen0(ptr::null(), 10, ptr::null(), &session, &mut engine) },
             "open dynamic WFP engine session",
         )?;
 
@@ -118,15 +100,13 @@ impl WfpSession {
             "begin WFP transaction",
         )?;
 
-        let mut provider_name: Vec<u16> =
-            "dns-shunt dynamic provider\0".encode_utf16().collect();
+        let mut provider_name: Vec<u16> = "dns-shunt dynamic provider\0".encode_utf16().collect();
         let mut provider = FWPM_PROVIDER0 {
             providerKey: PROVIDER_KEY,
             ..FWPM_PROVIDER0::default()
         };
         provider.displayData.name = provider_name.as_mut_ptr();
-        let add_result =
-            unsafe { FwpmProviderAdd0(engine, &provider, ptr::null_mut()) };
+        let add_result = unsafe { FwpmProviderAdd0(engine, &provider, ptr::null_mut()) };
         if let Err(error) = check_status(add_result, "add WFP provider") {
             unsafe {
                 let _ = FwpmTransactionAbort0(engine);
@@ -134,8 +114,7 @@ impl WfpSession {
             return Err(error);
         }
 
-        let mut sublayer_name: Vec<u16> =
-            "dns-shunt dynamic sublayer\0".encode_utf16().collect();
+        let mut sublayer_name: Vec<u16> = "dns-shunt dynamic sublayer\0".encode_utf16().collect();
         let mut sublayer = FWPM_SUBLAYER0 {
             subLayerKey: SUBLAYER_KEY,
             providerKey: &PROVIDER_KEY as *const GUID as *mut GUID,
@@ -143,8 +122,7 @@ impl WfpSession {
             ..FWPM_SUBLAYER0::default()
         };
         sublayer.displayData.name = sublayer_name.as_mut_ptr();
-        let add_sublayer =
-            unsafe { FwpmSubLayerAdd0(engine, &sublayer, ptr::null_mut()) };
+        let add_sublayer = unsafe { FwpmSubLayerAdd0(engine, &sublayer, ptr::null_mut()) };
         if let Err(error) = check_status(add_sublayer, "add WFP sublayer") {
             unsafe {
                 let _ = FwpmTransactionAbort0(engine);
@@ -163,14 +141,7 @@ impl WfpSession {
         };
         callout.displayData.name = callout_name.as_mut_ptr();
         if let Err(error) = check_status(
-            unsafe {
-                FwpmCalloutAdd0(
-                    engine,
-                    &callout,
-                    ptr::null_mut(),
-                    ptr::null_mut(),
-                )
-            },
+            unsafe { FwpmCalloutAdd0(engine, &callout, ptr::null_mut(), ptr::null_mut()) },
             "add WFP callout",
         ) {
             unsafe {
@@ -204,14 +175,7 @@ impl WfpSession {
         };
         filter.displayData.name = filter_name.as_mut_ptr();
         if let Err(error) = check_status(
-            unsafe {
-                FwpmFilterAdd0(
-                    engine,
-                    &filter,
-                    ptr::null_mut(),
-                    ptr::null_mut(),
-                )
-            },
+            unsafe { FwpmFilterAdd0(engine, &filter, ptr::null_mut(), ptr::null_mut()) },
             "add outbound DNS filter",
         ) {
             unsafe {
@@ -344,8 +308,7 @@ impl Device {
             }
             return Err(io::Error::last_os_error());
         }
-        let result =
-            unsafe { GetOverlappedResult(self.0, &overlapped, &mut read, 0) };
+        let result = unsafe { GetOverlappedResult(self.0, &overlapped, &mut read, 0) };
         unsafe {
             let _ = CloseHandle(event);
         }
@@ -394,9 +357,7 @@ impl Device {
             }
             return Err(io::Error::last_os_error());
         }
-        let result = unsafe {
-            GetOverlappedResult(self.0, &overlapped, &mut returned, 0)
-        };
+        let result = unsafe { GetOverlappedResult(self.0, &overlapped, &mut returned, 0) };
         unsafe {
             let _ = CloseHandle(event);
         }
@@ -441,9 +402,7 @@ unsafe impl Sync for DriverService {}
 
 impl DriverService {
     fn start_if_needed() -> io::Result<Self> {
-        let manager = unsafe {
-            OpenSCManagerW(ptr::null(), ptr::null(), SC_MANAGER_CONNECT)
-        };
+        let manager = unsafe { OpenSCManagerW(ptr::null(), ptr::null(), SC_MANAGER_CONNECT) };
         if manager.is_null() {
             return Err(io::Error::last_os_error());
         }
@@ -531,9 +490,7 @@ unsafe impl Sync for WfpSession {}
 impl InterceptionBackend for WfpBackend {
     fn capture(&self) -> Result<CapturedPacket, BackendError> {
         if self.shutdown_requested.load(Ordering::Acquire) {
-            return Err(BackendError(
-                "WFP capture stopped during shutdown".into(),
-            ));
+            return Err(BackendError("WFP capture stopped during shutdown".into()));
         }
         let mut buffer = self
             .receive_buffer
@@ -543,9 +500,9 @@ impl InterceptionBackend for WfpBackend {
             .device
             .as_ref()
             .ok_or_else(|| BackendError("WFP device is closed".into()))?;
-        let length = device.read(&mut buffer).map_err(|error| {
-            BackendError(format!("WFP capture read failed: {error}"))
-        })?;
+        let length = device
+            .read(&mut buffer)
+            .map_err(|error| BackendError(format!("WFP capture read failed: {error}")))?;
         let capture = wfp_protocol::decode_capture(&buffer[..length])?;
         let context = FlowContext {
             tuple: Some(capture.tuple),
@@ -574,42 +531,35 @@ impl InterceptionBackend for WfpBackend {
         })?;
         self.device_ref()?
             .control(wfp_protocol::IOCTL_RESOLVE, Some(&command))
-            .map_err(|error| {
-                BackendError(format!("WFP response injection failed: {error}"))
-            })?;
+            .map_err(|error| BackendError(format!("WFP response injection failed: {error}")))?;
         *resolved = true;
         Ok(())
     }
 
-    fn reinject_original(
-        &self,
-        context: &FlowContext,
-    ) -> Result<(), BackendError> {
+    fn reinject_original(&self, context: &FlowContext) -> Result<(), BackendError> {
         let token = valid_token(context)?;
         let mut resolved = begin_resolution(&token.resolved)?;
-        let command = wfp_protocol::encode_resolution(Resolution::Reinject {
-            token: token.token,
-        })?;
+        let command = wfp_protocol::encode_resolution(Resolution::Reinject { token: token.token })?;
         self.device_ref()?
             .control(wfp_protocol::IOCTL_RESOLVE, Some(&command))
-            .map_err(|error| {
-                BackendError(format!("WFP reinjection failed: {error}"))
-            })?;
+            .map_err(|error| BackendError(format!("WFP reinjection failed: {error}")))?;
         *resolved = true;
         Ok(())
     }
 
-    fn request_shutdown(&self) {
+    fn request_shutdown(&self) -> Result<(), BackendError> {
         if self.shutdown_requested.swap(true, Ordering::AcqRel) {
-            return;
+            return Ok(());
         }
         if let Some(device) = &self.device
-            && let Err(error) =
-                device.control(wfp_protocol::IOCTL_SHUTDOWN, None)
+            && let Err(error) = device.control(wfp_protocol::IOCTL_SHUTDOWN, None)
         {
-            eprintln!("could not stop WFP capture read: {error}");
             device.cancel_io();
+            return Err(BackendError(format!(
+                "could not stop WFP capture read: {error}"
+            )));
         }
+        Ok(())
     }
 }
 
@@ -634,9 +584,7 @@ fn valid_token(context: &FlowContext) -> Result<&WfpToken, BackendError> {
     Ok(token)
 }
 
-fn begin_resolution(
-    resolved: &Mutex<bool>,
-) -> Result<MutexGuard<'_, bool>, BackendError> {
+fn begin_resolution(resolved: &Mutex<bool>) -> Result<MutexGuard<'_, bool>, BackendError> {
     let state = resolved
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -648,7 +596,7 @@ fn begin_resolution(
 
 impl Drop for WfpBackend {
     fn drop(&mut self) {
-        self.request_shutdown();
+        let _ = self.request_shutdown();
         self.filter.take();
         self.device.take();
         self.service.take();
@@ -658,11 +606,10 @@ impl Drop for WfpBackend {
 pub fn run(
     config: Config,
     runtime: Arc<crate::admin::RuntimeState>,
+    console_mode: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     if !cfg!(target_arch = "x86_64") {
-        return Err(
-            "the WFP backend currently supports x64 Windows only".into()
-        );
+        return Err("the WFP backend currently supports x64 Windows only".into());
     }
     let service = DriverService::start_if_needed().map_err(|error| {
         format!(
@@ -685,9 +632,9 @@ pub fn run(
     let filter = WfpSession::install().map_err(|error| {
         format!("could not install dynamic WFP filters (run elevated): {error}")
     })?;
-    println!(
-        "WFP outbound DNS capture active; Ctrl+C stops the foreground prototype"
-    );
+    if console_mode {
+        println!("WFP outbound DNS capture active; Ctrl+C stops the foreground prototype");
+    }
     backend::run_proxy(
         Arc::new(WfpBackend {
             device: Some(device),
@@ -702,6 +649,7 @@ pub fn run(
         }),
         config,
         runtime,
+        console_mode,
     )
 }
 
@@ -731,16 +679,16 @@ mod tests {
             guid_eq(condition.fieldKey, FWPM_CONDITION_IP_REMOTE_PORT)
                 && unsafe { condition.conditionValue.Anonymous.uint16 == 53 }
         }));
-        assert!(!conditions.iter().any(|condition| guid_eq(
-            condition.fieldKey,
-            FWPM_CONDITION_IP_LOCAL_PORT
-        )));
+        assert!(
+            !conditions
+                .iter()
+                .any(|condition| guid_eq(condition.fieldKey, FWPM_CONDITION_IP_LOCAL_PORT))
+        );
         assert!(conditions.iter().any(|condition| {
             guid_eq(condition.fieldKey, FWPM_CONDITION_FLAGS)
                 && condition.matchType == FWP_MATCH_FLAGS_NONE_SET
                 && unsafe {
-                    condition.conditionValue.Anonymous.uint32
-                        == FWP_CONDITION_FLAG_IS_LOOPBACK
+                    condition.conditionValue.Anonymous.uint32 == FWP_CONDITION_FLAG_IS_LOOPBACK
                 }
         }));
     }

@@ -137,6 +137,52 @@ $runtimeDirectories = @(
     (Join-Path $targetRoot "debug"),
     (Join-Path $targetRoot "release")
 )
+$runtimeDriverPaths = @($runtimeDirectories | ForEach-Object {
+    [System.IO.Path]::GetFullPath(
+        (Join-Path $_ "WinDivert64.sys")
+    )
+})
+$loadedDriver = Get-CimInstance Win32_SystemDriver `
+    -Filter "Name = 'WinDivert'" -ErrorAction Stop
+if ($null -ne $loadedDriver -and $loadedDriver.State -eq "Running") {
+    $loadedDriverPath = [Environment]::ExpandEnvironmentVariables(
+        $loadedDriver.PathName.Trim('"')
+    )
+    if ($loadedDriverPath.StartsWith(
+        '\??\',
+        [StringComparison]::OrdinalIgnoreCase
+    )) {
+        $loadedDriverPath = $loadedDriverPath.Substring(4)
+    }
+    $loadedDriverPath = [System.IO.Path]::GetFullPath($loadedDriverPath)
+
+    if ($runtimeDriverPaths -contains $loadedDriverPath) {
+        Write-Output (
+            "Stopping the active WinDivert driver before replacing " +
+            "$loadedDriverPath."
+        )
+        & sc.exe stop WinDivert | Out-Null
+        if ($LASTEXITCODE -ne 0) {
+            throw "Could not stop the active WinDivert driver."
+        }
+
+        $stopDeadline = [DateTime]::UtcNow.AddSeconds(30)
+        do {
+            Start-Sleep -Milliseconds 250
+            $loadedDriver = Get-CimInstance Win32_SystemDriver `
+                -Filter "Name = 'WinDivert'" -ErrorAction Stop
+        } while (
+            $null -ne $loadedDriver -and
+            $loadedDriver.State -ne "Stopped" -and
+            [DateTime]::UtcNow -lt $stopDeadline
+        )
+        if ($null -ne $loadedDriver -and
+            $loadedDriver.State -ne "Stopped") {
+            throw "Timed out waiting for the WinDivert driver to stop."
+        }
+    }
+}
+
 foreach ($runtimeDirectory in $runtimeDirectories) {
     New-Item -ItemType Directory -Path $runtimeDirectory -Force | Out-Null
     Copy-Item -LiteralPath $dllPath -Destination $runtimeDirectory -Force
