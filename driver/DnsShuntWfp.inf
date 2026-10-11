@@ -1,0 +1,40 @@
+[Version]
+Signature   = "$WINDOWS NT$"
+Class       = System
+ClassGuid   = {4D36E97D-E325-11CE-BFC1-08002BE10318}
+Provider    = %ProviderName%
+CatalogFile = DnsShuntWfp.cat
+DriverVer   = 10/11/2026,1.0.0.0
+PnpLockdown = 1
+
+[DestinationDirs]
+DefaultDestDir = 12
+
+[DefaultInstall.NTamd64]
+CopyFiles = DriverCopy
+
+[DefaultInstall.NTamd64.Services]
+AddService = DnsShuntWfp,0x00000002,ServiceInstall
+
+[DriverCopy]
+DnsShuntWfp.sys
+
+[SourceDisksNames]
+1 = %DiskName%,,,
+
+[SourceDisksFiles]
+DnsShuntWfp.sys = 1
+
+[ServiceInstall]
+DisplayName    = %ServiceName%
+Description    = %ServiceDescription%
+ServiceType    = 1
+StartType      = 3
+ErrorControl   = 1
+ServiceBinary  = %12%\DnsShuntWfp.sys
+
+[Strings]
+ProviderName        = "dns-shunt development"
+DiskName            = "dns-shunt WFP callout package"
+ServiceName         = "dns-shunt WFP Callout"
+ServiceDescription  = "Opt-in outbound DNS transport callout for dns-shunt"

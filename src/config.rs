@@ -12,6 +12,7 @@ pub struct Config {
 }
 
 #[derive(Debug, Clone)]
+#[cfg_attr(not(any(target_os = "windows", test)), allow(dead_code))]
 pub struct Rule {
     pub name: String,
     pub wildcard: bool,
@@ -111,6 +112,7 @@ impl Config {
         })
     }
 
+    #[cfg_attr(not(any(target_os = "windows", test)), allow(dead_code))]
     pub fn lookup(&self, query_name: &str) -> Option<&Rule> {
         let name = query_name.trim_end_matches('.').to_ascii_lowercase();
         self.rules

@@ -22,8 +22,7 @@ const RECEIVE_TIMEOUT: Duration = Duration::from_millis(100);
 
 pub struct FlowContext {
     pub tuple: Option<FlowTuple>,
-    pub original_packet: Vec<u8>,
-    pub backend_data: Arc<dyn Any + Send + Sync>,
+    pub backend_context: Arc<dyn Any + Send + Sync>,
 }
 
 pub struct CapturedPacket {
@@ -342,8 +341,7 @@ mod tests {
                 destination: Ipv4Addr::new(198, 51, 100, 53),
                 destination_port: 53,
             }),
-            original_packet: vec![1, 2, 3],
-            backend_data: Arc::new(()),
+            backend_context: Arc::new(()),
         }
     }
 
@@ -390,5 +388,21 @@ mod tests {
         wrong[2] |= 0x80;
         assert!(table.complete(&wrong).is_none());
         assert_eq!(table.expire(now + REQUEST_TIMEOUT).len(), 1);
+    }
+
+    #[test]
+    fn returns_context_for_fail_open_when_request_table_is_full() {
+        let mut table = RequestTable::default();
+        let now = Instant::now();
+        for port in 0..MAX_IN_FLIGHT {
+            table
+                .insert(context(port as u16), &query(1, "bounded.example"), now)
+                .unwrap_or_else(|_| panic!("request {port} should fit in the table"));
+        }
+        let rejected = table
+            .insert(context(60000), &query(1, "overflow.example"), now)
+            .expect_err("capacity overflow must return its original flow context");
+        assert_eq!(rejected.tuple.unwrap().source_port, 60000);
+        assert_eq!(table.pending.len(), MAX_IN_FLIGHT);
     }
 }

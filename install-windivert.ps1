@@ -127,4 +127,4 @@ foreach ($runtimeDirectory in $runtimeDirectories) {
 }
 
 Write-Output "Installed WinDivert $version x64 runtime assets under target\debug and target\release."
-Write-Output "Run the prototype from an elevated terminal with: cargo run -- --config dns-shunt.example.toml --run"
+Write-Output "Run dns-shunt from an elevated terminal with: cargo run -- --config dns-shunt.example.toml --run"

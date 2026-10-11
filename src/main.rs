@@ -1,8 +1,17 @@
+#[cfg(any(target_os = "windows", test))]
 mod backend;
 mod config;
+#[cfg(any(target_os = "windows", test))]
 mod dns;
+#[cfg(any(target_os = "windows", test))]
 mod packet;
+#[cfg(any(target_os = "windows", test))]
+mod wfp_protocol;
 
+#[cfg(target_os = "windows")]
+mod upstream_socket;
+#[cfg(target_os = "windows")]
+mod wfp_backend;
 #[cfg(target_os = "windows")]
 mod windivert_backend;
 
@@ -21,6 +30,7 @@ fn main() -> ExitCode {
 fn run() -> Result<(), Box<dyn std::error::Error>> {
     let mut config_path = None;
     let mut enable_capture = false;
+    let mut backend = None;
     let mut args = env::args().skip(1);
 
     while let Some(arg) = args.next() {
@@ -30,6 +40,10 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 config_path = Some(PathBuf::from(path));
             }
             "--run" => enable_capture = true,
+            "--backend" => {
+                let value = args.next().ok_or("--backend requires wfp or windivert")?;
+                backend = Some(parse_backend(&value)?);
+            }
             "--help" | "-h" => {
                 print_help();
                 return Ok(());
@@ -53,16 +67,71 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     #[cfg(target_os = "windows")]
-    windivert_backend::run(config)?;
+    {
+        match selected_backend(backend) {
+            BackendChoice::Wfp => wfp_backend::run(config)?,
+            BackendChoice::WinDivert => windivert_backend::run(config)?,
+        }
+    }
 
     #[cfg(not(target_os = "windows"))]
-    return Err("packet interception is supported on Windows only".into());
+    return Err(format!(
+        "{} interception is supported on Windows only",
+        match selected_backend(backend) {
+            BackendChoice::Wfp => "WFP",
+            BackendChoice::WinDivert => "WinDivert",
+        }
+    )
+    .into());
 
+    #[cfg(target_os = "windows")]
     Ok(())
 }
 
 fn print_help() {
     println!(
-        "dns-shunt --config <path> [--run]\n\nValidate config by default. --run explicitly enables elevated WinDivert capture."
+        "dns-shunt --config <path> [--run] [--backend windivert|wfp]\n\nValidate config by default. --run enables elevated capture (WinDivert by default). Install its signed runtime assets with install-windivert.ps1.\nUse --backend wfp to select the experimental WFP backend; it requires an installed x64 callout driver, elevation, and a test-signing-enabled test machine for locally built drivers. Build the driver with the Windows Driver Kit (WDK)."
     );
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BackendChoice {
+    Wfp,
+    WinDivert,
+}
+
+fn parse_backend(value: &str) -> Result<BackendChoice, Box<dyn std::error::Error>> {
+    match value {
+        "wfp" => Ok(BackendChoice::Wfp),
+        "windivert" => Ok(BackendChoice::WinDivert),
+        _ => Err(format!("invalid backend '{value}'; expected wfp or windivert").into()),
+    }
+}
+
+fn selected_backend(requested: Option<BackendChoice>) -> BackendChoice {
+    requested.unwrap_or(BackendChoice::WinDivert)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_supported_backends_and_rejects_unknown_values() {
+        assert_eq!(parse_backend("wfp").unwrap(), BackendChoice::Wfp);
+        assert_eq!(
+            parse_backend("windivert").unwrap(),
+            BackendChoice::WinDivert
+        );
+        assert!(parse_backend("other").is_err());
+        assert_eq!(selected_backend(None), BackendChoice::WinDivert);
+        assert_eq!(
+            selected_backend(Some(BackendChoice::Wfp)),
+            BackendChoice::Wfp
+        );
+        assert_eq!(
+            selected_backend(Some(BackendChoice::WinDivert)),
+            BackendChoice::WinDivert
+        );
+    }
 }

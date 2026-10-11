@@ -6,10 +6,8 @@ use crate::{
 use std::{
     ffi::CString,
     io,
-    net::{Ipv4Addr, SocketAddrV4, UdpSocket},
-    os::windows::io::AsRawSocket,
     sync::{
-        Arc, Mutex,
+        Arc, Mutex, MutexGuard,
         atomic::{AtomicBool, Ordering},
     },
 };
@@ -19,15 +17,15 @@ use windivert_sys::{
     WinDivertSend, WinDivertShutdown, WinDivertShutdownMode,
 };
 use windows::Win32::Foundation::HANDLE;
-use windows_sys::Win32::Networking::WinSock::{
-    SO_EXCLUSIVEADDRUSE, SOCKET_ERROR, SOL_SOCKET, setsockopt,
-};
 
 // Largest IPv6 packet: 40-byte base header plus the 16-bit payload length.
 const MAX_NETWORK_PACKET_SIZE: usize = 65_535 + 40;
 
 struct CapturedAddress {
     address: WinDivertAddress<NetworkLayer>,
+    original_packet: Vec<u8>,
+    tuple: Option<packet::FlowTuple>,
+    terminal: Mutex<bool>,
 }
 
 struct WinDivertBackend {
@@ -138,12 +136,16 @@ impl InterceptionBackend for WinDivertBackend {
             }
             _ => (None, None),
         };
-        let metadata = CapturedAddress { address };
+        let metadata = CapturedAddress {
+            address,
+            original_packet: bytes,
+            tuple,
+            terminal: Mutex::new(false),
+        };
         Ok(CapturedPacket {
             context: FlowContext {
                 tuple,
-                original_packet: bytes,
-                backend_data: Arc::new(metadata),
+                backend_context: Arc::new(metadata),
             },
             dns_payload,
         })
@@ -154,15 +156,13 @@ impl InterceptionBackend for WinDivertBackend {
         context: &FlowContext,
         dns_payload: &[u8],
     ) -> Result<(), BackendError> {
+        let captured = validated_context(context)?;
         let tuple = context
             .tuple
             .ok_or_else(|| BackendError("response context has no IPv4/UDP tuple".into()))?;
         let response = packet::build_ipv4_udp(packet::response_tuple(tuple), dns_payload)
             .map_err(|error| BackendError(error.to_string()))?;
-        let captured = context
-            .backend_data
-            .downcast_ref::<CapturedAddress>()
-            .ok_or_else(|| BackendError("invalid WinDivert packet context".into()))?;
+        let mut terminal = begin_terminal(&captured.terminal)?;
         let mut injected = unsafe { WinDivertPacket::<NetworkLayer>::new(response) };
         injected.address = captured.address.clone();
         injected.address.set_outbound(false);
@@ -173,20 +173,20 @@ impl InterceptionBackend for WinDivertBackend {
         self.driver
             .send(&injected)
             .map_err(|error| BackendError(error.to_string()))?;
+        *terminal = true;
         Ok(())
     }
 
     fn reinject_original(&self, context: &FlowContext) -> Result<(), BackendError> {
-        let captured = context
-            .backend_data
-            .downcast_ref::<CapturedAddress>()
-            .ok_or_else(|| BackendError("invalid WinDivert packet context".into()))?;
+        let captured = validated_context(context)?;
+        let mut terminal = begin_terminal(&captured.terminal)?;
         let mut packet =
-            unsafe { WinDivertPacket::<NetworkLayer>::new(context.original_packet.clone()) };
+            unsafe { WinDivertPacket::<NetworkLayer>::new(captured.original_packet.clone()) };
         packet.address = captured.address.clone();
         self.driver
             .send(&packet)
             .map_err(|error| BackendError(error.to_string()))?;
+        *terminal = true;
         Ok(())
     }
 
@@ -200,8 +200,33 @@ impl InterceptionBackend for WinDivertBackend {
     }
 }
 
+fn validated_context(context: &FlowContext) -> Result<&CapturedAddress, BackendError> {
+    let captured = context
+        .backend_context
+        .downcast_ref::<CapturedAddress>()
+        .ok_or_else(|| BackendError("invalid WinDivert packet context".into()))?;
+    if context.tuple != captured.tuple {
+        return Err(BackendError(
+            "WinDivert packet tuple does not match context".into(),
+        ));
+    }
+    Ok(captured)
+}
+
+fn begin_terminal(terminal: &Mutex<bool>) -> Result<MutexGuard<'_, bool>, BackendError> {
+    let state = terminal
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if *state {
+        return Err(BackendError(
+            "WinDivert packet context already resolved".into(),
+        ));
+    }
+    Ok(state)
+}
+
 pub fn run(config: Config) -> Result<(), Box<dyn std::error::Error>> {
-    let upstream_socket = bind_exclusive(config.source_port)?;
+    let upstream_socket = crate::upstream_socket::bind_exclusive(config.source_port)?;
     let filter = format!(
         "outbound and !loopback and ip and udp and udp.DstPort == 53 and udp.SrcPort != {} and ip.MF == 0 and ip.FragOff == 0",
         config.source_port
@@ -219,33 +244,11 @@ pub fn run(config: Config) -> Result<(), Box<dyn std::error::Error>> {
     )
 }
 
-fn bind_exclusive(port: u16) -> io::Result<UdpSocket> {
-    let socket = socket2::Socket::new(
-        socket2::Domain::IPV4,
-        socket2::Type::DGRAM,
-        Some(socket2::Protocol::UDP),
-    )?;
-    let exclusive: i32 = 1;
-    let result = unsafe {
-        setsockopt(
-            socket.as_raw_socket() as usize,
-            SOL_SOCKET,
-            SO_EXCLUSIVEADDRUSE,
-            (&exclusive as *const i32).cast(),
-            size_of::<i32>() as i32,
-        )
-    };
-    if result == SOCKET_ERROR {
-        return Err(io::Error::last_os_error());
-    }
-    socket.bind(&SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, port).into())?;
-    Ok(socket.into())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::packet::FlowTuple;
+    use std::net::Ipv4Addr;
 
     #[test]
     fn filter_is_outbound_only_and_excludes_proxy_source_port() {
@@ -273,5 +276,34 @@ mod tests {
             (reversed.source_port, reversed.destination_port),
             (53, 12345)
         );
+    }
+
+    #[test]
+    fn validates_private_packet_context_and_prevents_duplicate_resolution() {
+        let tuple = FlowTuple {
+            source: Ipv4Addr::new(192, 0, 2, 11),
+            source_port: 12345,
+            destination: Ipv4Addr::new(192, 0, 2, 53),
+            destination_port: 53,
+        };
+        let captured = CapturedAddress {
+            address: unsafe { WinDivertAddress::<NetworkLayer>::new() },
+            original_packet: vec![1, 2, 3],
+            tuple: Some(tuple),
+            terminal: Mutex::new(false),
+        };
+        let context = FlowContext {
+            tuple: Some(tuple),
+            backend_context: Arc::new(captured),
+        };
+        let metadata = validated_context(&context).unwrap();
+        *begin_terminal(&metadata.terminal).unwrap() = true;
+        assert!(begin_terminal(&metadata.terminal).is_err());
+
+        let invalid_context = FlowContext {
+            tuple: None,
+            backend_context: Arc::new(()),
+        };
+        assert!(validated_context(&invalid_context).is_err());
     }
 }
