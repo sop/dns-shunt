@@ -1,0 +1,9 @@
+# Cargo build output
+/target/
+
+# Rust compiler backup files
+**/*.rs.bk
+
+# IDE
+/.vscode/
+/.kilo/

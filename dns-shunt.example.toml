@@ -1,0 +1,17 @@
+# Fixed IPv4 upstream resolver. Adapter DNS settings are not modified.
+upstream = "1.1.1.1"
+
+# The proxy binds this UDP port exclusively to prevent upstream recapture.
+source_port = 53053
+
+# Used when an individual rule does not specify a TTL.
+ttl = 60
+
+[[rules]]
+name = "dev.example.com"
+address = "192.0.2.10"
+
+[[rules]]
+name = "*.test.example.net"
+address = "192.0.2.20"
+ttl = 120
