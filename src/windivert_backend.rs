@@ -225,7 +225,10 @@ fn begin_terminal(terminal: &Mutex<bool>) -> Result<MutexGuard<'_, bool>, Backen
     Ok(state)
 }
 
-pub fn run(config: Config) -> Result<(), Box<dyn std::error::Error>> {
+pub fn run(
+    config: Config,
+    runtime: Arc<crate::admin::RuntimeState>,
+) -> Result<(), Box<dyn std::error::Error>> {
     let upstream_socket = crate::upstream_socket::bind_exclusive(config.source_port)?;
     let filter = format!(
         "outbound and !loopback and ip and udp and udp.DstPort == 53 and udp.SrcPort != {} and ip.MF == 0 and ip.FragOff == 0",
@@ -241,6 +244,7 @@ pub fn run(config: Config) -> Result<(), Box<dyn std::error::Error>> {
         }),
         config,
         upstream_socket,
+        runtime,
     )
 }
 

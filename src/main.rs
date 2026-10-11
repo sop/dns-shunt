@@ -1,10 +1,14 @@
 #[cfg(any(target_os = "windows", test))]
+mod admin;
+#[cfg(any(target_os = "windows", test))]
 mod backend;
 mod config;
 #[cfg(any(target_os = "windows", test))]
 mod dns;
 #[cfg(any(target_os = "windows", test))]
 mod packet;
+#[cfg(any(target_os = "windows", test))]
+mod rules;
 #[cfg(any(target_os = "windows", test))]
 mod wfp_protocol;
 
@@ -55,10 +59,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let config_path = config_path.ok_or("--config is required; use --help")?;
     let config = config::Config::load(&config_path)?;
     println!(
-        "validated {} override rule(s), upstream {}, reserved UDP port {}",
-        config.rules.len(),
-        config.upstream,
-        config.source_port
+        "validated upstream {}, reserved UDP port {}, admin name {}",
+        config.upstream, config.source_port, config.gui_name
     );
 
     if !enable_capture {
@@ -68,10 +70,24 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
 
     #[cfg(target_os = "windows")]
     {
-        match selected_backend(backend) {
-            BackendChoice::Wfp => wfp_backend::run(config)?,
-            BackendChoice::WinDivert => windivert_backend::run(config)?,
-        }
+        let rules_path = rules::default_store_path()?;
+        let rules = rules::RuleManager::load(rules_path, config.gui_name.clone(), config.ttl)?;
+        println!(
+            "loaded {} web-managed override rule(s)",
+            rules.snapshot().len()
+        );
+        let choice = selected_backend(backend);
+        let runtime = admin::RuntimeState::new(config.clone(), rules, choice.label());
+        let server = admin::AdminServer::bind(&runtime)?;
+        println!("admin interface: http://127.0.0.1:{}", config.gui_port);
+        let result = match choice {
+            BackendChoice::Wfp => wfp_backend::run(config, runtime.clone()),
+            BackendChoice::WinDivert => windivert_backend::run(config, runtime.clone()),
+        };
+        runtime.stop();
+        let server_result = server.join();
+        result?;
+        server_result?;
     }
 
     #[cfg(not(target_os = "windows"))]
@@ -90,7 +106,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
 
 fn print_help() {
     println!(
-        "dns-shunt --config <path> [--run] [--backend windivert|wfp]\n\nValidate config by default. --run enables elevated capture (WinDivert by default). Install its signed runtime assets with install-windivert.ps1.\nUse --backend wfp to select the experimental WFP backend; it requires an installed x64 callout driver, elevation, and a test-signing-enabled test machine for locally built drivers. Build the driver with the Windows Driver Kit (WDK)."
+        "dns-shunt --config <path> [--run] [--backend windivert|wfp]\n\nValidate config by default. --run starts the loopback web admin and elevated capture (WinDivert by default). Rules are stored in the current user's application-data directory. Install its signed runtime assets with install-windivert.ps1.\nUse --backend wfp to select the experimental WFP backend; it requires an installed x64 callout driver, elevation, and a test-signing-enabled test machine for locally built drivers. Build the driver with the Windows Driver Kit (WDK)."
     );
 }
 
@@ -98,6 +114,16 @@ fn print_help() {
 enum BackendChoice {
     Wfp,
     WinDivert,
+}
+
+impl BackendChoice {
+    #[cfg(target_os = "windows")]
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Wfp => "WFP",
+            Self::WinDivert => "WinDivert",
+        }
+    }
 }
 
 fn parse_backend(value: &str) -> Result<BackendChoice, Box<dyn std::error::Error>> {

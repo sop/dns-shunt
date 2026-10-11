@@ -7,11 +7,8 @@ source_port = 53053
 # Used when an individual rule does not specify a TTL.
 ttl = 60
 
-[[rules]]
-name = "dev.example.com"
-address = "192.0.2.10"
+# The built-in exact override resolves this name to 127.0.0.1.
+gui_name = "dns-shunt.local"
 
-[[rules]]
-name = "*.test.example.net"
-address = "192.0.2.20"
-ttl = 120
+# Loopback-only HTTP admin listener port.
+gui_port = 8080

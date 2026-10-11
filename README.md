@@ -1,6 +1,6 @@
 # dns-shunt
 
-`dns-shunt` is a foreground Windows DNS interception prototype. It returns configured IPv4 A-record overrides and forwards other supported DNS queries to a configured upstream resolver. Capture is opt-in; without `--run`, the program only validates the configuration. WinDivert is the default interception backend; the experimental WFP backend remains available through explicit selection.
+`dns-shunt` is a foreground Windows DNS interception prototype. It returns IPv4 A-record overrides managed through a local web interface and forwards other supported DNS queries to a configured upstream resolver. Capture and the web interface are opt-in; without `--run`, the program only validates TOML configuration. WinDivert is the default interception backend; the experimental WFP backend remains available through explicit selection.
 
 The WFP backend is experimental kernel-driver code. It has not been independently validated across Windows versions and is not production-ready. Use it only in a disposable Windows test environment.
 
@@ -48,18 +48,11 @@ Start with [`dns-shunt.example.toml`](dns-shunt.example.toml):
 upstream = "1.1.1.1"
 source_port = 53053
 ttl = 60
-
-[[rules]]
-name = "dev.example.com"
-address = "192.0.2.10"
-
-[[rules]]
-name = "*.test.example.net"
-address = "192.0.2.20"
-ttl = 120
+gui_name = "dns-shunt.local"
+gui_port = 8080
 ```
 
-`upstream` is an IPv4 resolver address on UDP port 53. `source_port` is exclusively bound while the proxy runs and excluded from capture to prevent recapturing its own upstream requests. Each rule provides an IPv4 address; its `ttl` is optional and defaults to the top-level `ttl`. Exact names take precedence over wildcard rules. A wildcard matches subdomains, not its apex.
+`upstream` is an IPv4 resolver address on UDP port 53. `source_port` is exclusively bound while the proxy runs and excluded from capture to prevent recapturing its own upstream requests. `ttl` is the default for web-managed rules. `gui_name` defaults to `dns-shunt.local` and is a reserved built-in exact override to `127.0.0.1`; `gui_port` defaults to `8080` and is the local HTTP listener port. Rules are not loaded from TOML. Legacy `[[rules]]` entries are ignored and are neither imported nor activated.
 
 The application does not change adapter DNS settings. The example addresses are from documentation-only ranges; replace them with addresses appropriate to your test.
 
@@ -77,6 +70,10 @@ Install the WinDivert runtime assets once, then run the default backend:
 .\install-windivert.ps1
 cargo run -- --config .\dns-shunt.example.toml --run
 ```
+
+With `--run`, the dashboard is available at `http://127.0.0.1:8080` (or the configured `gui_port`). The listener binds only to IPv4 loopback and must be accessed using an allowed local Host/Origin. It has no login and must not be exposed beyond the local machine. The configured `gui_name` resolves to loopback through intercepted DNS as well; use the numeric URL if DNS-over-HTTPS or another DNS path bypasses interception. A port conflict prevents capture from starting.
+
+User rules are stored as human-readable JSON in `%APPDATA%\dns-shunt\rules.json` on Windows. The browser can add, edit, and delete rules immediately; exact names precede wildcards, and wildcards match subdomains but not their apex. The JSON store is validated in full before it is persisted and published. Corrupt or unreadable stores fail startup rather than silently disabling overrides. Aggregate counters, uptime, and per-rule hit counts cover only the current run and are not written to disk; individual query names are never retained. Upstream, DNS source port, default TTL, GUI name, and HTTP port remain read-only TOML settings.
 
 WinDivert can also be selected explicitly. The experimental WFP backend remains available with `--backend wfp`:
 

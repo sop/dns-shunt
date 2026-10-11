@@ -1,5 +1,6 @@
 use crate::{
-    config::Config,
+    admin::RuntimeState,
+    config::{Config, Rule},
     dns::{self, Question},
     packet::FlowTuple,
 };
@@ -7,10 +8,7 @@ use std::{
     any::Any,
     collections::HashMap,
     net::{SocketAddr, UdpSocket},
-    sync::{
-        Arc, Mutex,
-        atomic::{AtomicBool, AtomicU64, Ordering},
-    },
+    sync::{Arc, Mutex},
     thread,
     time::{Duration, Instant},
 };
@@ -138,45 +136,46 @@ pub fn run_proxy(
     backend: Arc<dyn InterceptionBackend>,
     config: Config,
     upstream_socket: UdpSocket,
+    runtime: Arc<RuntimeState>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     upstream_socket.set_read_timeout(Some(RECEIVE_TIMEOUT))?;
     let upstream = SocketAddr::from((config.upstream, 53));
     let pending = Arc::new(Mutex::new(RequestTable::default()));
-    let stopping = Arc::new(AtomicBool::new(false));
-    let overrides = Arc::new(AtomicU64::new(0));
-    let forwarded = Arc::new(AtomicU64::new(0));
-    let fallbacks = Arc::new(AtomicU64::new(0));
+    let weak_backend = Arc::downgrade(&backend);
+    runtime.set_stop_callback(Arc::new(move || {
+        if let Some(backend) = weak_backend.upgrade() {
+            backend.request_shutdown();
+        }
+    }));
+    if runtime.is_stopping() {
+        runtime.stop();
+    }
 
     #[cfg(target_os = "windows")]
     {
-        let signal_stop = Arc::clone(&stopping);
-        let signal_backend = Arc::downgrade(&backend);
+        let signal_runtime = Arc::clone(&runtime);
         ctrlc::set_handler(move || {
-            signal_stop.store(true, Ordering::SeqCst);
-            if let Some(backend) = signal_backend.upgrade() {
-                backend.request_shutdown();
-            }
+            signal_runtime.stop();
         })?;
     }
 
     let response_backend = Arc::clone(&backend);
     let response_pending = Arc::clone(&pending);
-    let response_stop = Arc::clone(&stopping);
-    let response_fallbacks = Arc::clone(&fallbacks);
+    let response_runtime = Arc::clone(&runtime);
     let response_socket = upstream_socket.try_clone()?;
     let response_worker = thread::Builder::new()
         .name("dns-shunt-upstream".into())
         .spawn(move || {
             let mut buffer = vec![0u8; 65_535];
-            while !response_stop.load(Ordering::SeqCst) {
+            while !response_runtime.is_stopping() {
                 let received = response_socket.recv_from(&mut buffer);
                 let expired = response_pending
                     .lock()
                     .unwrap_or_else(|poisoned| poisoned.into_inner())
                     .expire(Instant::now());
                 for context in expired {
-                    reinject_or_log(&response_backend, &context);
-                    response_fallbacks.fetch_add(1, Ordering::Relaxed);
+                    reinject_or_log(&response_backend, &context, &response_runtime);
+                    response_runtime.record_fail_open();
                 }
                 match received {
                     Ok((length, source)) if source == upstream => {
@@ -189,8 +188,9 @@ pub fn run_proxy(
                                 .inject_response(&context, &payload)
                                 .is_err()
                         {
-                            reinject_or_log(&response_backend, &context);
-                            response_fallbacks.fetch_add(1, Ordering::Relaxed);
+                            response_runtime.record_error("upstream response injection failed");
+                            reinject_or_log(&response_backend, &context, &response_runtime);
+                            response_runtime.record_fail_open();
                         }
                     }
                     Ok(_) => {}
@@ -199,58 +199,69 @@ pub fn run_proxy(
                             error.kind(),
                             std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
                         ) => {}
-                    Err(_) => {
-                        response_stop.store(true, Ordering::SeqCst);
-                        response_backend.request_shutdown();
+                    Err(error) => {
+                        response_runtime
+                            .record_error(format!("upstream socket receive failed: {error}"));
+                        response_runtime.stop();
                         break;
                     }
                 }
             }
         })?;
 
-    while !stopping.load(Ordering::SeqCst) {
+    while !runtime.is_stopping() {
         let captured = match backend.capture() {
             Ok(captured) => captured,
             Err(error) => {
-                if stopping.load(Ordering::SeqCst) {
+                if runtime.is_stopping() {
                     break;
                 }
-                stopping.store(true, Ordering::SeqCst);
-                drain_pending(&backend, &pending, &fallbacks);
+                runtime.record_error(error.to_string());
+                runtime.stop();
+                drain_pending(&backend, &pending, &runtime);
                 let _ = response_worker.join();
                 return Err(Box::new(error));
             }
         };
         let Some(payload) = captured.dns_payload.as_deref() else {
-            reinject_or_log(&backend, &captured.context);
-            fallbacks.fetch_add(1, Ordering::Relaxed);
+            reinject_or_log(&backend, &captured.context, &runtime);
+            runtime.record_fail_open();
             continue;
         };
         let question = match dns::parse_query(payload) {
             Ok(question) => question,
             Err(_) => {
-                reinject_or_log(&backend, &captured.context);
-                fallbacks.fetch_add(1, Ordering::Relaxed);
+                reinject_or_log(&backend, &captured.context, &runtime);
+                runtime.record_fail_open();
                 continue;
             }
         };
 
+        let snapshot = runtime.rules.snapshot();
+        let matched_override = lookup_override(&snapshot, &config.gui_name, &question.name);
         if question.qtype == 1
             && question.qclass == 1
-            && let Some(rule) = config.lookup(&question.name)
+            && let Some(matched_override) = matched_override.as_ref()
         {
-            match dns::build_a_response(payload, &question, rule.address, rule.ttl) {
+            let (address, ttl) = match matched_override {
+                OverrideMatch::Builtin => (std::net::Ipv4Addr::LOCALHOST, config.ttl),
+                OverrideMatch::Rule(rule) => (rule.address, rule.ttl),
+            };
+            match dns::build_a_response(payload, &question, address, ttl) {
                 Ok(response)
                     if backend
                         .inject_response(&captured.context, &response)
                         .is_ok() =>
                 {
-                    overrides.fetch_add(1, Ordering::Relaxed);
+                    match matched_override {
+                        OverrideMatch::Rule(rule) => runtime.record_override(rule),
+                        OverrideMatch::Builtin => runtime.record_builtin_override(),
+                    }
                     continue;
                 }
                 _ => {
-                    reinject_or_log(&backend, &captured.context);
-                    fallbacks.fetch_add(1, Ordering::Relaxed);
+                    reinject_or_log(&backend, &captured.context, &runtime);
+                    runtime.record_fail_open();
                     continue;
                 }
             }
@@ -263,8 +274,8 @@ pub fn run_proxy(
         let (upstream_id, forwarded_query) = match inserted {
             Ok(request) => request,
             Err(context) => {
-                reinject_or_log(&backend, &context);
-                fallbacks.fetch_add(1, Ordering::Relaxed);
+                reinject_or_log(&backend, &context, &runtime);
+                runtime.record_fail_open();
                 continue;
             }
         };
@@ -274,45 +285,61 @@ pub fn run_proxy(
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
                 .remove(upstream_id);
             if let Some(context) = context {
-                reinject_or_log(&backend, &context);
+                reinject_or_log(&backend, &context, &runtime);
             }
-            fallbacks.fetch_add(1, Ordering::Relaxed);
+            runtime.record_error("sending DNS query to upstream failed");
+            runtime.record_fail_open();
         } else {
-            forwarded.fetch_add(1, Ordering::Relaxed);
+            runtime.record_forward();
         }
     }
 
-    drain_pending(&backend, &pending, &fallbacks);
+    drain_pending(&backend, &pending, &runtime);
     if response_worker.join().is_err() {
         eprintln!("upstream response worker terminated unexpectedly");
     }
-    eprintln!(
-        "stopped: overrides={}, forwarded={}, fail-open={}",
-        overrides.load(Ordering::Relaxed),
-        forwarded.load(Ordering::Relaxed),
-        fallbacks.load(Ordering::Relaxed)
-    );
+    eprintln!("DNS interception stopped");
     Ok(())
+}
+
+enum OverrideMatch {
+    Builtin,
+    Rule(Rule),
+}
+
+fn lookup_override(rules: &[Rule], gui_name: &str, query_name: &str) -> Option<OverrideMatch> {
+    if query_name.eq_ignore_ascii_case(gui_name) {
+        Some(OverrideMatch::Builtin)
+    } else {
+        crate::config::lookup_rule(rules, query_name)
+            .cloned()
+            .map(OverrideMatch::Rule)
+    }
 }
 
 fn drain_pending(
     backend: &Arc<dyn InterceptionBackend>,
     pending: &Arc<Mutex<RequestTable>>,
-    fallbacks: &AtomicU64,
+    runtime: &RuntimeState,
 ) {
     let queued = pending
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
         .drain();
     for context in queued {
-        reinject_or_log(backend, &context);
-        fallbacks.fetch_add(1, Ordering::Relaxed);
+        reinject_or_log(backend, &context, runtime);
+        runtime.record_fail_open();
     }
 }
 
-fn reinject_or_log(backend: &Arc<dyn InterceptionBackend>, context: &FlowContext) {
+fn reinject_or_log(
+    backend: &Arc<dyn InterceptionBackend>,
+    context: &FlowContext,
+    runtime: &RuntimeState,
+) {
     if let Err(error) = backend.reinject_original(context) {
         eprintln!("failed to reinject original DNS packet: {error}");
+        runtime.record_error(error.to_string());
     }
 }
 
@@ -404,5 +431,27 @@ mod tests {
             .expect_err("capacity overflow must return its original flow context");
         assert_eq!(rejected.tuple.unwrap().source_port, 60000);
         assert_eq!(table.pending.len(), MAX_IN_FLIGHT);
+    }
+
+    #[test]
+    fn built_in_gui_name_precedes_user_rules_and_user_wildcards() {
+        let rules = crate::config::validate_rules(
+            vec![crate::config::RuleInput {
+                name: "*.dns-shunt.local".into(),
+                address: "192.0.2.9".into(),
+                ttl: Some(60),
+            }],
+            "dns-shunt.local",
+            60,
+        )
+        .unwrap();
+        assert!(matches!(
+            lookup_override(&rules, "dns-shunt.local", "DNS-SHUNT.LOCAL"),
+            Some(OverrideMatch::Builtin)
+        ));
+        assert!(matches!(
+            lookup_override(&rules, "dns-shunt.local", "host.dns-shunt.local"),
+            Some(OverrideMatch::Rule(_))
+        ));
     }
 }

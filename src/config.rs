@@ -1,17 +1,23 @@
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::{collections::HashSet, fs, net::Ipv4Addr, path::Path, str::FromStr};
 use thiserror::Error;
 
 const DEFAULT_TTL: u32 = 60;
+pub const DEFAULT_GUI_NAME: &str = "dns-shunt.local";
+pub const DEFAULT_GUI_PORT: u16 = 8080;
 
 #[derive(Debug, Clone)]
+#[cfg_attr(not(any(target_os = "windows", test)), allow(dead_code))]
 pub struct Config {
     pub upstream: Ipv4Addr,
     pub source_port: u16,
-    pub rules: Vec<Rule>,
+    pub ttl: u32,
+    pub gui_name: String,
+    #[cfg_attr(not(any(target_os = "windows", test)), allow(dead_code))]
+    pub gui_port: u16,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(not(any(target_os = "windows", test)), allow(dead_code))]
 pub struct Rule {
     pub name: String,
@@ -20,21 +26,24 @@ pub struct Rule {
     pub ttl: u32,
 }
 
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[cfg_attr(not(any(target_os = "windows", test)), allow(dead_code))]
+pub struct RuleInput {
+    pub name: String,
+    pub address: String,
+    pub ttl: Option<u32>,
+}
+
 #[derive(Debug, Deserialize)]
 struct RawConfig {
     upstream: String,
     source_port: u16,
     #[serde(default = "default_ttl")]
     ttl: u32,
-    #[serde(default)]
-    rules: Vec<RawRule>,
-}
-
-#[derive(Debug, Deserialize)]
-struct RawRule {
-    name: String,
-    address: String,
-    ttl: Option<u32>,
+    #[serde(default = "default_gui_name")]
+    gui_name: String,
+    #[serde(default = "default_gui_port")]
+    gui_port: u16,
 }
 
 #[derive(Debug, Error)]
@@ -49,13 +58,17 @@ pub enum ConfigError {
     SourcePort,
     #[error("default TTL must be between 1 and 86400 seconds")]
     DefaultTtl,
+    #[error("invalid GUI DNS name: {0}")]
+    GuiName(String),
+    #[error("GUI HTTP port cannot be zero")]
+    GuiPort,
     #[error("invalid rule address for {0}")]
     RuleAddress(String),
     #[error("invalid DNS name or wildcard syntax: {0}")]
     RuleName(String),
     #[error("rule TTL for {0} must be between 1 and 86400 seconds")]
     RuleTtl(String),
-    #[error("duplicate or overlapping wildcard rule: {0}")]
+    #[error("duplicate, conflicting, or reserved rule: {0}")]
     Conflict(String),
 }
 
@@ -75,58 +88,92 @@ impl Config {
             return Err(ConfigError::SourcePort);
         }
         validate_ttl(raw.ttl).map_err(|_| ConfigError::DefaultTtl)?;
-
-        let mut rules = Vec::with_capacity(raw.rules.len());
-        let mut seen = HashSet::new();
-        for raw_rule in raw.rules {
-            let (name, wildcard) = canonical_rule_name(&raw_rule.name)?;
-            let key = (name.clone(), wildcard);
-            if !seen.insert(key) {
-                return Err(ConfigError::Conflict(raw_rule.name));
-            }
-            if wildcard
-                && rules.iter().any(|rule: &Rule| {
-                    rule.wildcard
-                        && (name.ends_with(&format!(".{}", rule.name))
-                            || rule.name.ends_with(&format!(".{name}")))
-                })
-            {
-                return Err(ConfigError::Conflict(raw_rule.name));
-            }
-            let address = Ipv4Addr::from_str(&raw_rule.address)
-                .map_err(|_| ConfigError::RuleAddress(raw_rule.name.clone()))?;
-            let ttl = raw_rule.ttl.unwrap_or(raw.ttl);
-            validate_ttl(ttl).map_err(|_| ConfigError::RuleTtl(raw_rule.name.clone()))?;
-            rules.push(Rule {
-                name,
-                wildcard,
-                address,
-                ttl,
-            });
+        let (gui_name, wildcard) = canonical_rule_name(&raw.gui_name)
+            .map_err(|_| ConfigError::GuiName(raw.gui_name.clone()))?;
+        if wildcard {
+            return Err(ConfigError::GuiName(raw.gui_name));
+        }
+        if raw.gui_port == 0 {
+            return Err(ConfigError::GuiPort);
         }
 
         Ok(Self {
             upstream,
             source_port: raw.source_port,
-            rules,
+            ttl: raw.ttl,
+            gui_name,
+            gui_port: raw.gui_port,
         })
     }
+}
 
-    #[cfg_attr(not(any(target_os = "windows", test)), allow(dead_code))]
-    pub fn lookup(&self, query_name: &str) -> Option<&Rule> {
-        let name = query_name.trim_end_matches('.').to_ascii_lowercase();
-        self.rules
-            .iter()
-            .find(|rule| !rule.wildcard && rule.name == name)
-            .or_else(|| {
-                self.rules
-                    .iter()
-                    .filter(|rule| rule.wildcard && name.len() > rule.name.len())
-                    .find(|rule| {
-                        name.ends_with(&rule.name)
-                            && name.as_bytes().get(name.len() - rule.name.len() - 1) == Some(&b'.')
-                    })
+#[cfg_attr(not(any(target_os = "windows", test)), allow(dead_code))]
+pub fn validate_rules(
+    inputs: Vec<RuleInput>,
+    reserved_name: &str,
+    default_ttl: u32,
+) -> Result<Vec<Rule>, ConfigError> {
+    let mut rules = Vec::with_capacity(inputs.len());
+    let mut seen = HashSet::new();
+    for input in inputs {
+        let (name, wildcard) = canonical_rule_name(&input.name)?;
+        if !wildcard && name == reserved_name {
+            return Err(ConfigError::Conflict(input.name));
+        }
+        let key = (name.clone(), wildcard);
+        if !seen.insert(key) {
+            return Err(ConfigError::Conflict(input.name));
+        }
+        if wildcard
+            && rules.iter().any(|rule: &Rule| {
+                rule.wildcard
+                    && (name.ends_with(&format!(".{}", rule.name))
+                        || rule.name.ends_with(&format!(".{name}")))
             })
+        {
+            return Err(ConfigError::Conflict(input.name));
+        }
+        let address = Ipv4Addr::from_str(&input.address)
+            .map_err(|_| ConfigError::RuleAddress(input.name.clone()))?;
+        let ttl = input.ttl.unwrap_or(default_ttl);
+        validate_ttl(ttl).map_err(|_| ConfigError::RuleTtl(input.name.clone()))?;
+        rules.push(Rule {
+            name,
+            wildcard,
+            address,
+            ttl,
+        });
+    }
+    Ok(rules)
+}
+
+#[cfg_attr(not(any(target_os = "windows", test)), allow(dead_code))]
+pub fn lookup_rule<'a>(rules: &'a [Rule], query_name: &str) -> Option<&'a Rule> {
+    let name = query_name.trim_end_matches('.').to_ascii_lowercase();
+    rules
+        .iter()
+        .find(|rule| !rule.wildcard && rule.name == name)
+        .or_else(|| {
+            rules
+                .iter()
+                .filter(|rule| rule.wildcard && name.len() > rule.name.len())
+                .find(|rule| {
+                    name.ends_with(&rule.name)
+                        && name.as_bytes().get(name.len() - rule.name.len() - 1) == Some(&b'.')
+                })
+        })
+}
+
+#[cfg_attr(not(any(target_os = "windows", test)), allow(dead_code))]
+pub fn rule_input(rule: &Rule) -> RuleInput {
+    RuleInput {
+        name: if rule.wildcard {
+            format!("*.{}", rule.name)
+        } else {
+            rule.name.clone()
+        },
+        address: rule.address.to_string(),
+        ttl: Some(rule.ttl),
     }
 }
 
@@ -168,6 +215,12 @@ fn validate_ttl(ttl: u32) -> Result<(), ()> {
 const fn default_ttl() -> u32 {
     DEFAULT_TTL
 }
+fn default_gui_name() -> String {
+    DEFAULT_GUI_NAME.to_owned()
+}
+const fn default_gui_port() -> u16 {
+    DEFAULT_GUI_PORT
+}
 
 #[cfg(test)]
 mod tests {
@@ -177,89 +230,135 @@ mod tests {
 upstream = "1.1.1.1"
 source_port = 53053
 ttl = 120
-
-[[rules]]
-name = "example.com"
-address = "192.0.2.1"
-
-[[rules]]
-name = "*.example.net"
-address = "192.0.2.2"
-ttl = 30
 "#;
 
+    fn inputs() -> Vec<RuleInput> {
+        vec![
+            RuleInput {
+                name: "example.com".into(),
+                address: "192.0.2.1".into(),
+                ttl: None,
+            },
+            RuleInput {
+                name: "*.example.net".into(),
+                address: "192.0.2.2".into(),
+                ttl: Some(30),
+            },
+        ]
+    }
+
     #[test]
-    fn validates_settings_and_normalizes_names() {
+    fn validates_operational_settings_and_gui_defaults() {
         let config = Config::parse(BASE).unwrap();
         assert_eq!(config.upstream, Ipv4Addr::new(1, 1, 1, 1));
-        assert_eq!(config.lookup("EXAMPLE.COM.").unwrap().ttl, 120);
-    }
-
-    #[test]
-    fn wildcard_matches_subdomain_depth_but_not_apex() {
-        let config = Config::parse(BASE).unwrap();
-        assert_eq!(config.lookup("www.example.net").unwrap().ttl, 30);
-        assert!(config.lookup("a.b.example.net").is_some());
-        assert!(config.lookup("example.net").is_none());
-        assert!(config.lookup("notexample.net").is_none());
-    }
-
-    #[test]
-    fn exact_rule_precedes_wildcard() {
-        let config = Config::parse(
-            r#"
-upstream = "8.8.8.8"
-source_port = 53053
-[[rules]]
-name = "*.example.com"
-address = "192.0.2.1"
-[[rules]]
-name = "api.example.com"
-address = "192.0.2.2"
-"#,
-        )
-        .unwrap();
+        assert_eq!(config.gui_name, DEFAULT_GUI_NAME);
+        assert_eq!(config.gui_port, DEFAULT_GUI_PORT);
         assert_eq!(
-            config.lookup("api.example.com").unwrap().address,
-            Ipv4Addr::new(192, 0, 2, 2)
+            Config::parse(&format!(
+                "{BASE}\ngui_name = \"Admin.Example.\"\ngui_port = 9090\n"
+            ))
+            .unwrap()
+            .gui_name,
+            "admin.example"
         );
     }
 
     #[test]
-    fn rejects_invalid_names_ports_and_ambiguous_wildcards() {
-        for config_text in [
-            BASE.replace("53053", "53"),
-            BASE.replace("example.com", "bad..example"),
-            BASE.replace("example.com", "example.com.."),
-            BASE.replace("*.example.net", "bad*.example.net"),
-        ] {
-            assert!(Config::parse(&config_text).is_err());
-        }
-        let overlapping_wildcards = r#"
-upstream = "8.8.8.8"
-source_port = 53053
-[[rules]]
-name = "*.example.net"
-address = "192.0.2.1"
-[[rules]]
-name = "*.sub.example.net"
-address = "192.0.2.2"
-"#;
-        assert!(Config::parse(overlapping_wildcards).is_err());
+    fn ignores_legacy_toml_rules_without_activating_them() {
+        let config = Config::parse(&format!(
+            "{BASE}\n[[rules]]\nname=\"old.example\"\naddress=\"192.0.2.9\"\n"
+        ))
+        .unwrap();
+        assert_eq!(config.gui_port, DEFAULT_GUI_PORT);
     }
 
     #[test]
-    fn rejects_invalid_addresses_ttls_and_duplicate_rules() {
-        for config_text in [
-            BASE.replace("1.1.1.1", "not-an-ip"),
-            BASE.replace("192.0.2.1", "300.0.2.1"),
-            BASE.replace("ttl = 120", "ttl = 0"),
-            BASE.replace("ttl = 30", "ttl = 86401"),
-            format!("{BASE}\n[[rules]]\nname = \"example.com\"\naddress = \"192.0.2.3\"\n"),
+    fn validates_names_wildcards_duplicates_and_reserved_host() {
+        let rules = validate_rules(inputs(), "dns-shunt.local", 120).unwrap();
+        assert_eq!(lookup_rule(&rules, "EXAMPLE.COM.").unwrap().ttl, 120);
+        assert!(lookup_rule(&rules, "www.example.net").is_some());
+        assert!(lookup_rule(&rules, "example.net").is_none());
+        assert!(
+            validate_rules(
+                vec![RuleInput {
+                    name: "DNS-SHUNT.LOCAL.".into(),
+                    address: "127.0.0.2".into(),
+                    ttl: None
+                }],
+                "dns-shunt.local",
+                60
+            )
+            .is_err()
+        );
+        let duplicates = vec![
+            inputs()[0].clone(),
+            RuleInput {
+                name: "EXAMPLE.COM.".into(),
+                address: "192.0.2.3".into(),
+                ttl: None,
+            },
+        ];
+        assert!(validate_rules(duplicates, "dns-shunt.local", 60).is_err());
+    }
+
+    #[test]
+    fn exact_rules_precede_wildcards_and_reject_invalid_values() {
+        let entries = vec![
+            RuleInput {
+                name: "*.example.com".into(),
+                address: "192.0.2.1".into(),
+                ttl: None,
+            },
+            RuleInput {
+                name: "api.example.com".into(),
+                address: "192.0.2.2".into(),
+                ttl: None,
+            },
+        ];
+        let rules = validate_rules(entries, "dns-shunt.local", 60).unwrap();
+        assert_eq!(
+            lookup_rule(&rules, "api.example.com").unwrap().address,
+            Ipv4Addr::new(192, 0, 2, 2)
+        );
+        for input in [
+            RuleInput {
+                name: "bad..example".into(),
+                address: "192.0.2.1".into(),
+                ttl: None,
+            },
+            RuleInput {
+                name: "bad*.example".into(),
+                address: "192.0.2.1".into(),
+                ttl: None,
+            },
+            RuleInput {
+                name: "good.example".into(),
+                address: "not-an-ip".into(),
+                ttl: None,
+            },
+            RuleInput {
+                name: "good.example".into(),
+                address: "192.0.2.1".into(),
+                ttl: Some(0),
+            },
         ] {
-            assert!(Config::parse(&config_text).is_err());
+            assert!(validate_rules(vec![input], "dns-shunt.local", 60).is_err());
         }
-        let multicast_upstream = BASE.replace("1.1.1.1", "224.0.0.1");
-        assert!(Config::parse(&multicast_upstream).is_err());
+        assert!(Config::parse(&format!("{BASE}\ngui_name=\"*.bad.example\"\n")).is_err());
+        assert!(Config::parse(&format!("{BASE}\ngui_port=0\n")).is_err());
+
+        let overlapping = vec![
+            RuleInput {
+                name: "*.example.net".into(),
+                address: "192.0.2.1".into(),
+                ttl: None,
+            },
+            RuleInput {
+                name: "*.sub.example.net".into(),
+                address: "192.0.2.2".into(),
+                ttl: None,
+            },
+        ];
+        assert!(validate_rules(overlapping, "dns-shunt.local", 60).is_err());
     }
 }

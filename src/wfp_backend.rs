@@ -603,7 +603,10 @@ impl Drop for WfpBackend {
     }
 }
 
-pub fn run(config: Config) -> Result<(), Box<dyn std::error::Error>> {
+pub fn run(
+    config: Config,
+    runtime: Arc<crate::admin::RuntimeState>,
+) -> Result<(), Box<dyn std::error::Error>> {
     if !cfg!(target_arch = "x86_64") {
         return Err("the WFP backend currently supports x64 Windows only".into());
     }
@@ -634,6 +637,7 @@ pub fn run(config: Config) -> Result<(), Box<dyn std::error::Error>> {
         }),
         config,
         upstream_socket,
+        runtime,
     )
 }
 
