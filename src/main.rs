@@ -13,8 +13,6 @@ mod rules;
 mod wfp_protocol;
 
 #[cfg(target_os = "windows")]
-mod upstream_socket;
-#[cfg(target_os = "windows")]
 mod wfp_backend;
 #[cfg(target_os = "windows")]
 mod windivert_backend;
@@ -59,8 +57,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let config_path = config_path.ok_or("--config is required; use --help")?;
     let config = config::Config::load(&config_path)?;
     println!(
-        "validated upstream {}, reserved UDP port {}, admin name {}",
-        config.upstream, config.source_port, config.gui_name
+        "validated override configuration, admin name {}",
+        config.gui_name
     );
 
     if !enable_capture {

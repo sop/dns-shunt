@@ -229,12 +229,8 @@ pub fn run(
     config: Config,
     runtime: Arc<crate::admin::RuntimeState>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let upstream_socket = crate::upstream_socket::bind_exclusive(config.source_port)?;
-    let filter = format!(
-        "outbound and !loopback and ip and udp and udp.DstPort == 53 and udp.SrcPort != {} and ip.MF == 0 and ip.FragOff == 0",
-        config.source_port
-    );
-    let driver = WinDivertDriver::open(&filter)?;
+    let filter = "outbound and !loopback and ip and udp and udp.DstPort == 53 and ip.MF == 0 and ip.FragOff == 0";
+    let driver = WinDivertDriver::open(filter)?;
     println!("WinDivert capture active; Ctrl+C stops the foreground prototype");
     backend::run_proxy(
         Arc::new(WinDivertBackend {
@@ -243,7 +239,6 @@ pub fn run(
             receive_buffer: Mutex::new(vec![0; MAX_NETWORK_PACKET_SIZE]),
         }),
         config,
-        upstream_socket,
         runtime,
     )
 }
@@ -255,13 +250,11 @@ mod tests {
     use std::net::Ipv4Addr;
 
     #[test]
-    fn filter_is_outbound_only_and_excludes_proxy_source_port() {
-        let filter = format!(
-            "outbound and !loopback and ip and udp and udp.DstPort == 53 and udp.SrcPort != {} and ip.MF == 0 and ip.FragOff == 0",
-            53053
-        );
+    fn filter_is_outbound_only_and_has_no_reserved_source_port_exclusion() {
+        let filter = "outbound and !loopback and ip and udp and udp.DstPort == 53 and ip.MF == 0 and ip.FragOff == 0";
         assert!(filter.starts_with("outbound"));
-        assert!(filter.contains("udp.SrcPort != 53053"));
+        assert!(filter.contains("udp.DstPort == 53"));
+        assert!(!filter.contains("SrcPort"));
         assert!(!filter.contains("inbound"));
     }
 

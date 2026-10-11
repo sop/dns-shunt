@@ -28,7 +28,6 @@ pub struct RuntimeState {
     listener_failed: AtomicBool,
     stop_callback: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
     overrides: AtomicU64,
-    forwarded: AtomicU64,
     fail_open: AtomicU64,
     errors: AtomicU64,
     rule_hits: Mutex<HashMap<String, u64>>,
@@ -46,7 +45,6 @@ impl RuntimeState {
             listener_failed: AtomicBool::new(false),
             stop_callback: Mutex::new(None),
             overrides: AtomicU64::new(0),
-            forwarded: AtomicU64::new(0),
             fail_open: AtomicU64::new(0),
             errors: AtomicU64::new(0),
             rule_hits: Mutex::new(HashMap::new()),
@@ -96,9 +94,6 @@ impl RuntimeState {
         self.overrides.fetch_add(1, Ordering::Relaxed);
     }
 
-    pub fn record_forward(&self) {
-        self.forwarded.fetch_add(1, Ordering::Relaxed);
-    }
     pub fn record_fail_open(&self) {
         self.fail_open.fetch_add(1, Ordering::Relaxed);
     }
@@ -110,19 +105,16 @@ impl RuntimeState {
             .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(error.into());
     }
 
-    fn status(&self) -> Value {
+    pub(crate) fn status(&self) -> Value {
         json!({
             "service": if self.is_stopping() { "stopping" } else { "running" },
             "uptime_seconds": self.started.elapsed().as_secs(),
             "backend": self.backend,
             "overrides": self.overrides.load(Ordering::Relaxed),
-            "forwarded": self.forwarded.load(Ordering::Relaxed),
             "fail_open": self.fail_open.load(Ordering::Relaxed),
             "errors": self.errors.load(Ordering::Relaxed),
             "last_error": self.last_error.read().unwrap_or_else(|poisoned| poisoned.into_inner()).clone(),
             "settings": {
-                "upstream": self.config.upstream.to_string(),
-                "source_port": self.config.source_port,
                 "default_ttl": self.config.ttl,
                 "gui_name": self.config.gui_name,
                 "gui_port": self.config.gui_port,
@@ -489,12 +481,12 @@ const DASHBOARD: &str = r##"<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>dns-shunt / control room</title>
 <style>
 :root{color-scheme:dark;--bg:#101514;--panel:#191f1d;--line:#303a36;--muted:#a5b3aa;--ink:#edf4ec;--acid:#c7f36b;--orange:#e69b63}*{box-sizing:border-box}body{margin:0;background:radial-gradient(ellipse at 85% -10%,#324338 0,transparent 38%),var(--bg);color:var(--ink);font:15px/1.5 ui-monospace,SFMono-Regular,Consolas,monospace}main{max-width:1160px;margin:auto;padding:34px 24px 60px}.top{display:flex;justify-content:space-between;align-items:center;border-bottom:1px solid var(--line);padding-bottom:22px}.brand{font-size:14px;color:var(--muted);letter-spacing:.14em;text-transform:uppercase}.brand b{color:var(--acid)}h1{font:500 clamp(34px,6vw,64px)/1.05 system-ui,sans-serif;letter-spacing:-.055em;margin:18px 0 8px}.lede{color:var(--muted);margin:0}.live{color:var(--acid);border:1px solid #607742;padding:7px 11px;border-radius:3px;font-size:12px}.grid{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin:30px 0}.card,.section{background:linear-gradient(145deg,#1c2420,#171c1a);border:1px solid var(--line);border-radius:5px}.card{padding:16px}.label{font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.1em}.value{font:500 30px/1.25 system-ui,sans-serif;margin-top:10px}.unit{font-size:12px;color:var(--muted)}.layout{display:grid;grid-template-columns:minmax(0,1.65fr) minmax(260px,.85fr);gap:14px}.section{padding:20px}.section h2{font:500 20px system-ui,sans-serif;margin:0 0 18px}.section-title{display:flex;align-items:center;justify-content:space-between}.count{font-size:12px;color:var(--muted)}form{display:grid;grid-template-columns:1.2fr 1fr 100px auto;gap:8px;margin-bottom:16px}input,button{font:inherit;border:1px solid var(--line);border-radius:3px;padding:10px;background:#0f1412;color:var(--ink);min-width:0}input:focus{outline:1px solid var(--acid)}button{cursor:pointer;background:var(--acid);border-color:var(--acid);color:#15200f;font-weight:700}button.delete{padding:5px 9px;background:transparent;color:#ff9b82;border-color:#714d41}table{width:100%;border-collapse:collapse;text-align:left}th{font-size:10px;color:var(--muted);font-weight:400;text-transform:uppercase;letter-spacing:.1em}td,th{padding:11px 8px;border-bottom:1px solid var(--line)}td{font-size:13px}td.hit{text-align:right;color:var(--acid);font-variant-numeric:tabular-nums}.empty{color:var(--muted);text-align:center;padding:28px 8px}.settings{display:grid;grid-template-columns:1fr auto;gap:12px 8px;font-size:12px}.settings dt{color:var(--muted)}.settings dd{margin:0;text-align:right;overflow-wrap:anywhere}.notice{min-height:22px;color:var(--orange);font-size:12px}.foot{margin-top:14px;color:var(--muted);font-size:11px}@media(max-width:780px){main{padding:22px 14px}.grid{grid-template-columns:repeat(2,1fr)}.layout{grid-template-columns:1fr}form{grid-template-columns:1fr 1fr}.settings dd{max-width:190px}}@media(max-width:420px){form{grid-template-columns:1fr}.section{padding:14px}td,th{padding:9px 4px;font-size:11px}}
-</style></head><body><main><div class="top"><div class="brand"><b>dns-shunt</b> / local control room</div><div class="live" id="service">CONNECTING</div></div><h1>Route your names.</h1><p class="lede">Local DNS overrides, runtime health, no query history.</p>
-<div class="grid"><div class="card"><div class="label">Override answers</div><div class="value" id="overrides">0</div></div><div class="card"><div class="label">Forwarded upstream</div><div class="value" id="forwarded">0</div></div><div class="card"><div class="label">Fail-open</div><div class="value" id="failopen">0</div></div><div class="card"><div class="label">Uptime</div><div class="value" id="uptime">0<span class="unit">s</span></div></div></div>
+</style></head><body><main><div class="top"><div class="brand"><b>dns-shunt</b> / local control room</div><div class="live" id="service">CONNECTING</div></div><h1>Route your names.</h1><p class="lede">Matched A/IN overrides only. Unmatched DNS passes through unchanged.</p>
+<div class="grid"><div class="card"><div class="label">Override answers</div><div class="value" id="overrides">0</div></div><div class="card"><div class="label">Fail-open</div><div class="value" id="failopen">0</div></div><div class="card"><div class="label">Errors</div><div class="value" id="errors">0</div></div><div class="card"><div class="label">Uptime</div><div class="value" id="uptime">0<span class="unit">s</span></div></div></div>
 <div class="layout"><section class="section"><div class="section-title"><h2>Override rules</h2><span class="count" id="rule-count">0 rules</span></div><form id="rule-form"><input name="index" type="hidden"><input name="name" placeholder="host.example or *.example" required><input name="address" placeholder="IPv4 address" required><input name="ttl" type="number" min="1" max="86400" placeholder="TTL"><button type="submit">Add rule +</button></form><div class="notice" id="notice"></div><div style="overflow-x:auto"><table><thead><tr><th>Pattern</th><th>IPv4 answer</th><th>TTL</th><th style="text-align:right">Hits</th><th></th></tr></thead><tbody id="rules"></tbody></table></div><p class="foot">Exact names win. Wildcards match subdomains, not the apex.</p></section><aside class="section"><h2>Service configuration</h2><dl class="settings" id="settings"></dl><p class="foot">Operational settings are read-only here and remain TOML-owned.</p></aside></div></main>
 <script>
 const $=id=>document.getElementById(id);let current=[];function esc(value){return String(value).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}async function api(path,options={}){const response=await fetch(path,{...options,headers:{'Content-Type':'application/json',...(options.headers||{})}});const body=await response.json();if(!response.ok)throw Error(body.error||response.statusText);return body}function showError(error){$('notice').textContent=error.message}
-async function refresh(){try{const [status,rules]=await Promise.all([api('/api/status'),api('/api/rules')]);$('service').textContent=status.service.toUpperCase()+' · '+status.backend;$('overrides').textContent=status.overrides;$('forwarded').textContent=status.forwarded;$('failopen').textContent=status.fail_open;$('uptime').innerHTML=esc(status.uptime_seconds)+'<span class="unit">s</span>';const s=status.settings;$('settings').innerHTML=[['Upstream',s.upstream+':53'],['UDP source port',s.source_port],['Default TTL',s.default_ttl+'s'],['GUI hostname',s.gui_name],['HTTP port',s.gui_port],['Rule store',s.rules_path],['Errors',status.errors]].map(([k,v])=>'<dt>'+esc(k)+'</dt><dd>'+esc(v)+'</dd>').join('');current=rules;$('rule-count').textContent=rules.length+' rules';$('rules').innerHTML=rules.length?rules.map((rule,index)=>'<tr><td>'+esc(rule.name)+'</td><td>'+esc(rule.address)+'</td><td>'+rule.ttl+'s</td><td class="hit">'+rule.hits+'</td><td><button class="edit" data-index="'+index+'">Edit</button> <button class="delete" data-index="'+index+'" aria-label="Delete '+esc(rule.name)+'">×</button></td></tr>').join(''):'<tr><td class="empty" colspan="5">No overrides yet. Add one above.</td></tr>';document.querySelectorAll('.edit').forEach(button=>button.addEventListener('click',()=>{const index=Number(button.dataset.index),rule=current[index],form=$('rule-form');form.elements.index.value=index;form.elements.name.value=rule.name;form.elements.address.value=rule.address;form.elements.ttl.value=rule.ttl;form.querySelector('button[type=submit]').textContent='Save changes';form.elements.name.focus()}));document.querySelectorAll('.delete').forEach(button=>button.addEventListener('click',async()=>{try{await api('/api/rules/'+button.dataset.index,{method:'DELETE'});$('notice').textContent='Rule removed';await refresh()}catch(error){showError(error)}}));if(status.last_error)$('notice').textContent='Last error: '+status.last_error}catch(error){$('service').textContent='OFFLINE';showError(error)}}
+ async function refresh(){try{const [status,rules]=await Promise.all([api('/api/status'),api('/api/rules')]);$('service').textContent=status.service.toUpperCase()+' · '+status.backend;$('overrides').textContent=status.overrides;$('failopen').textContent=status.fail_open;$('errors').textContent=status.errors;$('uptime').innerHTML=esc(status.uptime_seconds)+'<span class="unit">s</span>';const s=status.settings;$('settings').innerHTML=[['Default TTL',s.default_ttl+'s'],['GUI hostname',s.gui_name],['HTTP port',s.gui_port],['Rule store',s.rules_path]].map(([k,v])=>'<dt>'+esc(k)+'</dt><dd>'+esc(v)+'</dd>').join('');current=rules;$('rule-count').textContent=rules.length+' rules';$('rules').innerHTML=rules.length?rules.map((rule,index)=>'<tr><td>'+esc(rule.name)+'</td><td>'+esc(rule.address)+'</td><td>'+rule.ttl+'s</td><td class="hit">'+rule.hits+'</td><td><button class="edit" data-index="'+index+'">Edit</button> <button class="delete" data-index="'+index+'" aria-label="Delete '+esc(rule.name)+'">×</button></td></tr>').join(''):'<tr><td class="empty" colspan="5">No overrides yet. Add one above.</td></tr>';document.querySelectorAll('.edit').forEach(button=>button.addEventListener('click',()=>{const index=Number(button.dataset.index),rule=current[index],form=$('rule-form');form.elements.index.value=index;form.elements.name.value=rule.name;form.elements.address.value=rule.address;form.elements.ttl.value=rule.ttl;form.querySelector('button[type=submit]').textContent='Save changes';form.elements.name.focus()}));document.querySelectorAll('.delete').forEach(button=>button.addEventListener('click',async()=>{try{await api('/api/rules/'+button.dataset.index,{method:'DELETE'});$('notice').textContent='Rule removed';await refresh()}catch(error){showError(error)}}));if(status.last_error)$('notice').textContent='Last error: '+status.last_error}catch(error){$('service').textContent='OFFLINE';showError(error)}}
 $('rule-form').addEventListener('submit',async event=>{event.preventDefault();const form=new FormData(event.currentTarget),index=form.get('index'),body={name:form.get('name'),address:form.get('address'),ttl:form.get('ttl')?Number(form.get('ttl')):null};try{await api('/api/rules',{method:index===''?'POST':'PUT',body:JSON.stringify(index===''?body:{...body,index:Number(index)})});event.currentTarget.reset();event.currentTarget.querySelector('button[type=submit]').textContent='Add rule +';$('notice').textContent='Rule saved and active';await refresh()}catch(error){showError(error)}});refresh();setInterval(refresh,2000);
 </script></body></html>"##;
 
@@ -641,14 +633,15 @@ mod tests {
             .transact(|_| Ok(vec![config::rule_input(&rule)]))
             .unwrap();
         state.record_override(&rule);
-        state.record_forward();
         let status = state.status();
         assert_eq!(status["overrides"], 1);
-        assert_eq!(status["forwarded"], 1);
+        assert!(status.get("forwarded").is_none());
+        assert!(status["settings"].get("upstream").is_none());
+        assert!(status["settings"].get("source_port").is_none());
         assert_eq!(state.rules_json()[0]["hits"], 1);
         let restarted = runtime();
         assert_eq!(restarted.status()["overrides"], 0);
-        assert_eq!(restarted.status()["forwarded"], 0);
         assert!(DASHBOARD.contains("/api/status"));
+        assert!(!DASHBOARD.contains("Forwarded upstream"));
     }
 }

@@ -9,8 +9,6 @@ pub const DEFAULT_GUI_PORT: u16 = 8080;
 #[derive(Debug, Clone)]
 #[cfg_attr(not(any(target_os = "windows", test)), allow(dead_code))]
 pub struct Config {
-    pub upstream: Ipv4Addr,
-    pub source_port: u16,
     pub ttl: u32,
     pub gui_name: String,
     #[cfg_attr(not(any(target_os = "windows", test)), allow(dead_code))]
@@ -36,8 +34,6 @@ pub struct RuleInput {
 
 #[derive(Debug, Deserialize)]
 struct RawConfig {
-    upstream: String,
-    source_port: u16,
     #[serde(default = "default_ttl")]
     ttl: u32,
     #[serde(default = "default_gui_name")]
@@ -52,10 +48,6 @@ pub enum ConfigError {
     Io(#[from] std::io::Error),
     #[error("invalid TOML: {0}")]
     Toml(#[from] toml::de::Error),
-    #[error("upstream must be a fixed, non-unspecified IPv4 address")]
-    Upstream,
-    #[error("reserved UDP source port must be in 1024..=65535 and cannot be 53")]
-    SourcePort,
     #[error("default TTL must be between 1 and 86400 seconds")]
     DefaultTtl,
     #[error("invalid GUI DNS name: {0}")]
@@ -80,13 +72,6 @@ impl Config {
 
     pub fn parse(text: &str) -> Result<Self, ConfigError> {
         let raw: RawConfig = toml::from_str(text)?;
-        let upstream = Ipv4Addr::from_str(&raw.upstream).map_err(|_| ConfigError::Upstream)?;
-        if upstream.is_unspecified() || upstream.is_broadcast() || upstream.is_multicast() {
-            return Err(ConfigError::Upstream);
-        }
-        if raw.source_port < 1024 || raw.source_port == 53 {
-            return Err(ConfigError::SourcePort);
-        }
         validate_ttl(raw.ttl).map_err(|_| ConfigError::DefaultTtl)?;
         let (gui_name, wildcard) = canonical_rule_name(&raw.gui_name)
             .map_err(|_| ConfigError::GuiName(raw.gui_name.clone()))?;
@@ -98,8 +83,6 @@ impl Config {
         }
 
         Ok(Self {
-            upstream,
-            source_port: raw.source_port,
             ttl: raw.ttl,
             gui_name,
             gui_port: raw.gui_port,
@@ -226,11 +209,7 @@ const fn default_gui_port() -> u16 {
 mod tests {
     use super::*;
 
-    const BASE: &str = r#"
-upstream = "1.1.1.1"
-source_port = 53053
-ttl = 120
-"#;
+    const BASE: &str = "ttl = 120\n";
 
     fn inputs() -> Vec<RuleInput> {
         vec![
@@ -248,9 +227,9 @@ ttl = 120
     }
 
     #[test]
-    fn validates_operational_settings_and_gui_defaults() {
+    fn validates_override_settings_and_gui_defaults() {
         let config = Config::parse(BASE).unwrap();
-        assert_eq!(config.upstream, Ipv4Addr::new(1, 1, 1, 1));
+        assert_eq!(config.ttl, 120);
         assert_eq!(config.gui_name, DEFAULT_GUI_NAME);
         assert_eq!(config.gui_port, DEFAULT_GUI_PORT);
         assert_eq!(
@@ -261,6 +240,14 @@ ttl = 120
             .gui_name,
             "admin.example"
         );
+    }
+
+    #[test]
+    fn accepts_legacy_upstream_and_source_port_as_ignored_unknown_keys() {
+        let config =
+            Config::parse("upstream = \"not-an-ip\"\nsource_port = 53\nttl = 120\n").unwrap();
+        assert_eq!(config.ttl, 120);
+        assert_eq!(config.gui_name, DEFAULT_GUI_NAME);
     }
 
     #[test]

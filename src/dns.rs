@@ -18,19 +18,11 @@ pub enum DnsError {
 }
 
 pub fn parse_query(message: &[u8]) -> Result<Question, DnsError> {
-    parse_question(message, false)
-}
-
-pub fn parse_response_question(message: &[u8]) -> Result<Question, DnsError> {
-    parse_question(message, true)
-}
-
-fn parse_question(message: &[u8], response: bool) -> Result<Question, DnsError> {
     if message.len() < 12 {
         return Err(DnsError::Malformed);
     }
     let flags = u16::from_be_bytes([message[2], message[3]]);
-    if (flags & 0x8000 != 0) != response || flags & 0x7800 != 0 {
+    if flags & 0x8000 != 0 || flags & 0x7800 != 0 {
         return Err(DnsError::Unsupported);
     }
     if u16::from_be_bytes([message[4], message[5]]) != 1 {
@@ -179,15 +171,6 @@ pub fn build_a_response(
     Ok(response)
 }
 
-pub fn rewrite_id(message: &[u8], id: u16) -> Result<Vec<u8>, DnsError> {
-    if message.len() < 12 {
-        return Err(DnsError::Malformed);
-    }
-    let mut rewritten = message.to_vec();
-    rewritten[..2].copy_from_slice(&id.to_be_bytes());
-    Ok(rewritten)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -224,7 +207,7 @@ mod tests {
     }
 
     #[test]
-    fn unsupported_query_types_are_parseable_and_forwardable() {
+    fn unsupported_query_types_are_parseable_but_not_overridden() {
         let message = query("example.com", 28);
         let question = parse_query(&message).unwrap();
         assert_eq!(question.qtype, 28);
@@ -261,13 +244,5 @@ mod tests {
         let mut trailing_data = query("example.com", 1);
         trailing_data.push(0);
         assert_eq!(parse_query(&trailing_data), Err(DnsError::Malformed));
-    }
-
-    #[test]
-    fn rewrites_only_transaction_id() {
-        let original = query("example.com", 28);
-        let rewritten = rewrite_id(&original, 0xabcd).unwrap();
-        assert_eq!(&rewritten[..2], &[0xab, 0xcd]);
-        assert_eq!(&rewritten[2..], &original[2..]);
     }
 }

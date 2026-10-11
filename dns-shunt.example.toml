@@ -1,9 +1,3 @@
-# Fixed IPv4 upstream resolver. Adapter DNS settings are not modified.
-upstream = "1.1.1.1"
-
-# The proxy binds this UDP port exclusively to prevent upstream recapture.
-source_port = 53053
-
 # Used when an individual rule does not specify a TTL.
 ttl = 60
 
@@ -11,4 +5,4 @@ ttl = 60
 gui_name = "dns-shunt.local"
 
 # Loopback-only HTTP admin listener port.
-gui_port = 8080
+gui_port = 53080

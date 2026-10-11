@@ -1,7 +1,6 @@
 use crate::{
     backend::{self, BackendError, CapturedPacket, FlowContext, InterceptionBackend},
     config::Config,
-    upstream_socket,
     wfp_protocol::{self, Resolution},
 };
 use std::{
@@ -74,7 +73,7 @@ const FILTER_KEY: GUID = GUID::from_u128(0x7c6a_7814_1106_41df_8d70_868a_2c4d_85
 struct WfpSession(HANDLE);
 
 impl WfpSession {
-    fn install(source_port: u16) -> Result<Self, String> {
+    fn install() -> Result<Self, String> {
         let session = FWPM_SESSION0 {
             flags: FWPM_SESSION_FLAG_DYNAMIC,
             ..FWPM_SESSION0::default()
@@ -85,7 +84,7 @@ impl WfpSession {
             "open dynamic WFP engine session",
         )?;
 
-        let result = Self::install_objects(engine, source_port);
+        let result = Self::install_objects(engine);
         if let Err(error) = result {
             unsafe {
                 let _ = FwpmEngineClose0(engine);
@@ -95,7 +94,7 @@ impl WfpSession {
         Ok(Self(engine))
     }
 
-    fn install_objects(engine: HANDLE, source_port: u16) -> Result<(), String> {
+    fn install_objects(engine: HANDLE) -> Result<(), String> {
         check_status(
             unsafe { FwpmTransactionBegin0(engine, 0) },
             "begin WFP transaction",
@@ -151,7 +150,7 @@ impl WfpSession {
             return Err(error);
         }
 
-        let mut conditions = filter_conditions(source_port);
+        let mut conditions = filter_conditions();
         let mut filter_name: Vec<u16> = "dns-shunt outbound IPv4 DNS filter\0"
             .encode_utf16()
             .collect();
@@ -210,7 +209,7 @@ fn check_status(status: u32, operation: &str) -> Result<(), String> {
     }
 }
 
-fn filter_conditions(source_port: u16) -> Vec<FWPM_FILTER_CONDITION0> {
+fn filter_conditions() -> Vec<FWPM_FILTER_CONDITION0> {
     vec![
         condition(FWPM_CONDITION_IP_PROTOCOL, FWP_MATCH_EQUAL, FWP_UINT8, 17),
         condition(
@@ -218,12 +217,6 @@ fn filter_conditions(source_port: u16) -> Vec<FWPM_FILTER_CONDITION0> {
             FWP_MATCH_EQUAL,
             FWP_UINT16,
             53,
-        ),
-        condition(
-            FWPM_CONDITION_IP_LOCAL_PORT,
-            FWP_MATCH_NOT_EQUAL,
-            FWP_UINT16,
-            u32::from(source_port),
         ),
         condition(
             FWPM_CONDITION_FLAGS,
@@ -610,7 +603,6 @@ pub fn run(
     if !cfg!(target_arch = "x86_64") {
         return Err("the WFP backend currently supports x64 Windows only".into());
     }
-    let upstream_socket = upstream_socket::bind_exclusive(config.source_port)?;
     let service = DriverService::start_if_needed().map_err(|error| {
         format!("could not start installed WFP driver service (run elevated): {error}")
     })?;
@@ -619,7 +611,7 @@ pub fn run(
             "could not open WFP callout device; verify driver installation and elevation: {error}"
         )
     })?;
-    let filter = WfpSession::install(config.source_port).map_err(|error| {
+    let filter = WfpSession::install().map_err(|error| {
         format!("could not install dynamic WFP filters (run elevated): {error}")
     })?;
     println!("WFP outbound DNS capture active; Ctrl+C stops the foreground prototype");
@@ -636,7 +628,6 @@ pub fn run(
             ]),
         }),
         config,
-        upstream_socket,
         runtime,
     )
 }
@@ -654,9 +645,9 @@ mod tests {
     }
 
     #[test]
-    fn filter_conditions_capture_only_non_loopback_udp_dns_not_reserved_port() {
-        let conditions = filter_conditions(53053);
-        assert_eq!(conditions.len(), 4);
+    fn filter_conditions_capture_non_loopback_udp_dns_without_source_port_exclusion() {
+        let conditions = filter_conditions();
+        assert_eq!(conditions.len(), 3);
         assert!(conditions.iter().any(|condition| {
             guid_eq(condition.fieldKey, FWPM_CONDITION_IP_PROTOCOL)
                 && condition.matchType == FWP_MATCH_EQUAL
@@ -667,11 +658,11 @@ mod tests {
             guid_eq(condition.fieldKey, FWPM_CONDITION_IP_REMOTE_PORT)
                 && unsafe { condition.conditionValue.Anonymous.uint16 == 53 }
         }));
-        assert!(conditions.iter().any(|condition| {
-            guid_eq(condition.fieldKey, FWPM_CONDITION_IP_LOCAL_PORT)
-                && condition.matchType == FWP_MATCH_NOT_EQUAL
-                && unsafe { condition.conditionValue.Anonymous.uint16 == 53053 }
-        }));
+        assert!(
+            !conditions
+                .iter()
+                .any(|condition| guid_eq(condition.fieldKey, FWPM_CONDITION_IP_LOCAL_PORT))
+        );
         assert!(conditions.iter().any(|condition| {
             guid_eq(condition.fieldKey, FWPM_CONDITION_FLAGS)
                 && condition.matchType == FWP_MATCH_FLAGS_NONE_SET

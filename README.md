@@ -1,6 +1,8 @@
 # dns-shunt
 
-`dns-shunt` is a foreground Windows DNS interception prototype. It returns IPv4 A-record overrides managed through a local web interface and forwards other supported DNS queries to a configured upstream resolver. Capture and the web interface are opt-in; without `--run`, the program only validates TOML configuration. WinDivert is the default interception backend; the experimental WFP backend remains available through explicit selection.
+`dns-shunt` is a foreground Windows DNS override prototype. It synthesizes answers only for matching A/IN records managed through a local web interface. All other DNS packets are passed through unchanged to the resolver Windows selected; the application does not select, configure, or proxy to a resolver. It does not change adapter DNS settings. Capture and the web interface are opt-in; without `--run`, the program only validates TOML configuration. WinDivert is the default interception backend; the experimental WFP backend remains available through explicit selection.
+
+Both backends inspect only outbound, non-loopback IPv4 UDP DNS packets to port 53. IPv6, TCP/53, inbound DNS, and loopback traffic are outside the interception scope.
 
 The WFP backend is experimental kernel-driver code. It has not been independently validated across Windows versions and is not production-ready. Use it only in a disposable Windows test environment.
 
@@ -45,16 +47,14 @@ cargo check --target x86_64-pc-windows-msvc
 Start with [`dns-shunt.example.toml`](dns-shunt.example.toml):
 
 ```toml
-upstream = "1.1.1.1"
-source_port = 53053
 ttl = 60
 gui_name = "dns-shunt.local"
 gui_port = 8080
 ```
 
-`upstream` is an IPv4 resolver address on UDP port 53. `source_port` is exclusively bound while the proxy runs and excluded from capture to prevent recapturing its own upstream requests. `ttl` is the default for web-managed rules. `gui_name` defaults to `dns-shunt.local` and is a reserved built-in exact override to `127.0.0.1`; `gui_port` defaults to `8080` and is the local HTTP listener port. Rules are not loaded from TOML. Legacy `[[rules]]` entries are ignored and are neither imported nor activated.
+`ttl` is the default for web-managed rules. `gui_name` defaults to `dns-shunt.local` and is a reserved built-in exact override to `127.0.0.1`; `gui_port` defaults to `8080` and is the local HTTP listener port. Rules are not loaded from TOML. Legacy `[[rules]]` entries are ignored and are neither imported nor activated. Older `upstream` and `source_port` keys are also ignored and have no runtime effect.
 
-The application does not change adapter DNS settings. The example addresses are from documentation-only ranges; replace them with addresses appropriate to your test.
+The application does not change adapter DNS settings or the original DNS destination. Windows continues to choose the resolver for unmatched queries.
 
 ## Run
 
@@ -73,7 +73,7 @@ cargo run -- --config .\dns-shunt.example.toml --run
 
 With `--run`, the dashboard is available at `http://127.0.0.1:8080` (or the configured `gui_port`). The listener binds only to IPv4 loopback and must be accessed using an allowed local Host/Origin. It has no login and must not be exposed beyond the local machine. The configured `gui_name` resolves to loopback through intercepted DNS as well; use the numeric URL if DNS-over-HTTPS or another DNS path bypasses interception. A port conflict prevents capture from starting.
 
-User rules are stored as human-readable JSON in `%APPDATA%\dns-shunt\rules.json` on Windows. The browser can add, edit, and delete rules immediately; exact names precede wildcards, and wildcards match subdomains but not their apex. The JSON store is validated in full before it is persisted and published. Corrupt or unreadable stores fail startup rather than silently disabling overrides. Aggregate counters, uptime, and per-rule hit counts cover only the current run and are not written to disk; individual query names are never retained. Upstream, DNS source port, default TTL, GUI name, and HTTP port remain read-only TOML settings.
+User rules are stored as human-readable JSON in `%APPDATA%\dns-shunt\rules.json` on Windows. The browser can add, edit, and delete rules immediately; exact names precede wildcards, and wildcards match subdomains but not their apex. Only matching A/IN queries receive synthesized responses. Nonmatching names, AAAA queries, other classes, malformed DNS, and unsupported messages are immediately reinjected unchanged; unmatched traffic is neither correlated nor counted. The JSON store is validated in full before it is persisted and published. Corrupt or unreadable stores fail startup rather than silently disabling overrides. Aggregate override, fail-open, and error counters, uptime, and per-rule hit counts cover only the current run and are not written to disk; individual query names are never retained. TTL, GUI name, and HTTP port remain read-only TOML settings.
 
 WinDivert can also be selected explicitly. The experimental WFP backend remains available with `--backend wfp`:
 
@@ -116,19 +116,19 @@ Run the application elevated with the test configuration:
 cargo run -- --config .\dns-shunt.example.toml --run --backend wfp
 ```
 
-In another terminal, query the configured override directly through the upstream resolver:
+In another terminal, query the configured override using the DNS resolver selected by Windows:
 
 ```powershell
-Resolve-DnsName dev.example.com -Type A -Server 1.1.1.1 -DnsOnly
+Resolve-DnsName dev.example.com -Type A -DnsOnly
 ```
 
-The answer should contain the configured address (`192.0.2.10` in the example). An unmatched name should be forwarded upstream:
+The answer should contain the configured address (`192.0.2.10` in the example). An unmatched name should reach the resolver selected by Windows unchanged:
 
 ```powershell
-Resolve-DnsName example.com -Type A -Server 1.1.1.1 -DnsOnly
+Resolve-DnsName example.com -Type A -DnsOnly
 ```
 
-To exercise the wildcard rule, query a name below `test.example.net`, such as `host.test.example.net`. Use a DNS query tool that sends ordinary IPv4 UDP DNS to port 53; the current WFP filter does not intercept IPv6, TCP DNS, inbound queries, loopback traffic, or traffic from the reserved upstream source port.
+To exercise the wildcard rule, query a name below `test.example.net`, such as `host.test.example.net`. Use a DNS query tool that sends ordinary IPv4 UDP DNS to port 53; the current WFP filter does not intercept IPv6, TCP DNS, inbound queries, or loopback traffic.
 
 Press Ctrl+C in the proxy terminal to stop. Confirm ordinary DNS works afterward and that no dynamic WFP filter remains. If the install script started the driver, stop and remove the service with:
 
@@ -146,12 +146,11 @@ Add `-RemovePackage` to remove the staged driver package as well:
 
 For driver or proxy changes, verify at minimum:
 
-- Configured A overrides and unmatched upstream forwarding.
-- Parallel queries with repeated DNS transaction IDs.
-- Malformed DNS and upstream timeout behavior.
+- Configured A overrides and unchanged pass-through for unmatched A/IN, matching AAAA, and non-IN queries.
+- Malformed DNS reinjection and override response injection failure behavior.
 - Ctrl+C, controller process termination, and driver stop restore normal DNS without duplicate replies.
 - Queue saturation fails open and does not leave packets held.
-- Non-DNS UDP, loopback, reserved-source-port traffic, IPv6, and inbound DNS are not captured.
+- Non-DNS UDP, loopback, IPv6, and inbound DNS are not captured.
 - The client-visible response tuple is the reverse of the original query tuple, and dynamic filters disappear on exit.
 
 These packet-level checks require a disposable, correctly configured Windows test VM. The WFP driver has not been built or validated in every supported environment; successful Rust tests do not establish kernel-driver safety.
