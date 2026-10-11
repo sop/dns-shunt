@@ -28,7 +28,10 @@ pub trait InterceptionBackend: Send + Sync + 'static {
         context: &FlowContext,
         dns_payload: &[u8],
     ) -> Result<(), BackendError>;
-    fn reinject_original(&self, context: &FlowContext) -> Result<(), BackendError>;
+    fn reinject_original(
+        &self,
+        context: &FlowContext,
+    ) -> Result<(), BackendError>;
     fn request_shutdown(&self) {}
 }
 
@@ -108,7 +111,8 @@ fn process_captured_packet(
         return;
     }
     let snapshot = runtime.rules.snapshot();
-    let Some(matched_override) = lookup_override(&snapshot, &config.gui_name, &question.name)
+    let Some(matched_override) =
+        lookup_override(&snapshot, &config.gui_name, &question.name)
     else {
         reinject_or_log(backend, &context, runtime);
         return;
@@ -117,7 +121,8 @@ fn process_captured_packet(
         OverrideMatch::Builtin => (std::net::Ipv4Addr::LOCALHOST, config.ttl),
         OverrideMatch::Rule(rule) => (rule.address, rule.ttl),
     };
-    let response = match dns::build_a_response(payload, &question, address, ttl) {
+    let response = match dns::build_a_response(payload, &question, address, ttl)
+    {
         Ok(response) => response,
         Err(error) => {
             fail_open(
@@ -149,7 +154,11 @@ enum OverrideMatch {
     Rule(Rule),
 }
 
-fn lookup_override(rules: &[Rule], gui_name: &str, query_name: &str) -> Option<OverrideMatch> {
+fn lookup_override(
+    rules: &[Rule],
+    gui_name: &str,
+    query_name: &str,
+) -> Option<OverrideMatch> {
     if query_name.eq_ignore_ascii_case(gui_name) {
         Some(OverrideMatch::Builtin)
     } else {
@@ -218,7 +227,9 @@ mod tests {
         ) -> Result<(), BackendError> {
             self.response_attempts.fetch_add(1, Ordering::Relaxed);
             if self.fail_response.load(Ordering::Relaxed) {
-                return Err(BackendError("mock response injection failure".into()));
+                return Err(BackendError(
+                    "mock response injection failure".into(),
+                ));
             }
             self.responses
                 .lock()
@@ -227,11 +238,16 @@ mod tests {
             Ok(())
         }
 
-        fn reinject_original(&self, context: &FlowContext) -> Result<(), BackendError> {
+        fn reinject_original(
+            &self,
+            context: &FlowContext,
+        ) -> Result<(), BackendError> {
             let original = context
                 .backend_context
                 .downcast_ref::<OriginalPayload>()
-                .ok_or_else(|| BackendError("invalid mock packet context".into()))?;
+                .ok_or_else(|| {
+                    BackendError("invalid mock packet context".into())
+                })?;
             self.reinjections
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -270,7 +286,9 @@ mod tests {
     }
 
     fn runtime() -> (Config, Arc<RuntimeState>) {
-        let config = Config::parse("upstream = \"not-an-address\"\nsource_port = 53\n").unwrap();
+        let config =
+            Config::parse("upstream = \"not-an-address\"\nsource_port = 53\n")
+                .unwrap();
         let nonce = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
@@ -278,7 +296,9 @@ mod tests {
         let path = env::temp_dir()
             .join(format!("dns-shunt-backend-{nonce}"))
             .join("rules.json");
-        let rules = RuleManager::load(path, config.gui_name.clone(), config.ttl).unwrap();
+        let rules =
+            RuleManager::load(path, config.gui_name.clone(), config.ttl)
+                .unwrap();
         rules
             .transact(|_| {
                 Ok(vec![RuleInput {
@@ -296,7 +316,12 @@ mod tests {
         let (config, runtime) = runtime();
         let backend = MockBackend::default();
         let original = query(0x1234, "match.example", 1, 1);
-        process_captured_packet(&backend, &config, &runtime, packet(Some(original.clone())));
+        process_captured_packet(
+            &backend,
+            &config,
+            &runtime,
+            packet(Some(original.clone())),
+        );
 
         let responses = backend.responses.lock().unwrap();
         assert_eq!(responses.len(), 1);
@@ -320,7 +345,12 @@ mod tests {
             query(3, "match.example", 1, 3),
         ];
         for original in &packets {
-            process_captured_packet(&backend, &config, &runtime, packet(Some(original.clone())));
+            process_captured_packet(
+                &backend,
+                &config,
+                &runtime,
+                packet(Some(original.clone())),
+            );
         }
         let reinjections = backend.reinjections.lock().unwrap();
         assert_eq!(
@@ -339,8 +369,16 @@ mod tests {
         let (config, runtime) = runtime();
         let backend = MockBackend::default();
         let malformed = vec![1, 2, 3];
-        process_captured_packet(&backend, &config, &runtime, packet(Some(malformed.clone())));
-        assert_eq!(*backend.reinjections.lock().unwrap(), vec![Some(malformed)]);
+        process_captured_packet(
+            &backend,
+            &config,
+            &runtime,
+            packet(Some(malformed.clone())),
+        );
+        assert_eq!(
+            *backend.reinjections.lock().unwrap(),
+            vec![Some(malformed)]
+        );
         assert_eq!(runtime.status()["overrides"], 0);
         assert_eq!(runtime.status()["fail_open"], 1);
     }
@@ -351,7 +389,12 @@ mod tests {
         let backend = MockBackend::default();
         backend.fail_response.store(true, Ordering::Relaxed);
         let original = query(4, "match.example", 1, 1);
-        process_captured_packet(&backend, &config, &runtime, packet(Some(original.clone())));
+        process_captured_packet(
+            &backend,
+            &config,
+            &runtime,
+            packet(Some(original.clone())),
+        );
         assert_eq!(backend.response_attempts.load(Ordering::Relaxed), 1);
         assert_eq!(*backend.reinjections.lock().unwrap(), vec![Some(original)]);
         assert_eq!(runtime.status()["overrides"], 0);

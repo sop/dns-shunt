@@ -9,7 +9,10 @@ Add-Type -AssemblyName System.IO.Compression.FileSystem
 
 $version = "2.2.2"
 $assetName = "WinDivert-$version-A.zip"
-$assetUrl = "https://github.com/basil00/WinDivert/releases/download/v$version/$assetName"
+$assetUrl = (
+    "https://github.com/basil00/WinDivert/releases/download/v$version/" +
+    $assetName
+)
 $expectedArchiveSize = 405137
 $projectRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 $targetRoot = Join-Path $projectRoot "target"
@@ -29,8 +32,12 @@ function Test-ValidDriverSignature {
     param([Parameter(Mandatory = $true)][string]$Path)
 
     $signature = Get-AuthenticodeSignature -FilePath $Path
-    if ($signature.Status -ne [System.Management.Automation.SignatureStatus]::Valid) {
-        throw "WinDivert driver signature is not valid ($($signature.Status)): $Path"
+    if ($signature.Status -ne
+        [System.Management.Automation.SignatureStatus]::Valid) {
+        throw (
+            "WinDivert driver signature is not valid " +
+            "($($signature.Status)): $Path"
+        )
     }
 }
 
@@ -58,7 +65,8 @@ function Copy-ArchiveEntry {
 
 $haveAssets = (Test-Path -LiteralPath $dllPath) -and
     (Test-Path -LiteralPath $driverPath) -and
-    ((Get-Item -LiteralPath $dllPath -ErrorAction SilentlyContinue).Length -gt 0)
+    ((Get-Item -LiteralPath $dllPath `
+        -ErrorAction SilentlyContinue).Length -gt 0)
 if ($Force -or -not $haveAssets) {
     $downloadPath = "$archivePath.download"
     if (Test-Path -LiteralPath $stageRoot) {
@@ -67,11 +75,16 @@ if ($Force -or -not $haveAssets) {
     New-Item -ItemType Directory -Path $stageRoot -Force | Out-Null
 
     try {
-        [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+        [Net.ServicePointManager]::SecurityProtocol = (
+            [Net.SecurityProtocolType]::Tls12
+        )
         Invoke-WebRequest -Uri $assetUrl -OutFile $downloadPath -UseBasicParsing
         $downloadSize = (Get-Item -LiteralPath $downloadPath).Length
         if ($downloadSize -ne $expectedArchiveSize) {
-            throw "Unexpected WinDivert archive size: expected $expectedArchiveSize bytes, got $downloadSize."
+            throw (
+                "Unexpected WinDivert archive size: expected " +
+                "$expectedArchiveSize bytes, got $downloadSize."
+            )
         }
 
         $archive = [System.IO.Compression.ZipFile]::OpenRead($downloadPath)
@@ -84,7 +97,10 @@ if ($Force -or -not $haveAssets) {
             } | Select-Object -First 1
 
             if ($null -eq $dllEntry -or $null -eq $driverEntry) {
-                throw "The release archive does not contain the expected x64 runtime files."
+                throw (
+                    "The release archive does not contain the expected " +
+                    "x64 runtime files."
+                )
             }
 
             $stagedDll = Join-Path $stageRoot "WinDivert.dll"
@@ -93,7 +109,8 @@ if ($Force -or -not $haveAssets) {
             Copy-ArchiveEntry -Entry $driverEntry -Destination $stagedDriver
             Test-ValidDriverSignature -Path $stagedDriver
 
-            Copy-Item -LiteralPath $downloadPath -Destination $archivePath -Force
+            Copy-Item -LiteralPath $downloadPath `
+                -Destination $archivePath -Force
             Copy-Item -LiteralPath $stagedDll -Destination $dllPath -Force
             Copy-Item -LiteralPath $stagedDriver -Destination $driverPath -Force
         }
@@ -126,5 +143,11 @@ foreach ($runtimeDirectory in $runtimeDirectories) {
     Copy-Item -LiteralPath $driverPath -Destination $runtimeDirectory -Force
 }
 
-Write-Output "Installed WinDivert $version x64 runtime assets under target\debug and target\release."
-Write-Output "Run dns-shunt from an elevated terminal with: cargo run -- --config dns-shunt.example.toml --run"
+Write-Output (
+    "Installed WinDivert $version x64 runtime assets under target\debug " +
+    "and target\release."
+)
+Write-Output (
+    "Run dns-shunt from an elevated terminal with: " +
+    "cargo run -- --config dns-shunt.example.toml --run"
+)

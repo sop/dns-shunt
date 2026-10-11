@@ -49,10 +49,10 @@ Start with [`dns-shunt.example.toml`](dns-shunt.example.toml):
 ```toml
 ttl = 60
 gui_name = "dns-shunt.local"
-gui_port = 8080
+gui_port = 53080
 ```
 
-`ttl` is the default for web-managed rules. `gui_name` defaults to `dns-shunt.local` and is a reserved built-in exact override to `127.0.0.1`; `gui_port` defaults to `8080` and is the local HTTP listener port. Rules are not loaded from TOML. Legacy `[[rules]]` entries are ignored and are neither imported nor activated. Older `upstream` and `source_port` keys are also ignored and have no runtime effect.
+`ttl` is the default for web-managed rules. `gui_name` defaults to `dns-shunt.local` and is a reserved built-in exact override to `127.0.0.1`; `gui_port` defaults to `53080` and is the local HTTP listener port. Rules are not loaded from TOML. Legacy `[[rules]]` entries are ignored and are neither imported nor activated. Older `upstream` and `source_port` keys are also ignored and have no runtime effect.
 
 The application does not change adapter DNS settings or the original DNS destination. Windows continues to choose the resolver for unmatched queries.
 
@@ -71,7 +71,7 @@ Install the WinDivert runtime assets once, then run the default backend:
 cargo run -- --config .\dns-shunt.example.toml --run
 ```
 
-With `--run`, the dashboard is available at `http://127.0.0.1:8080` (or the configured `gui_port`). The listener binds only to IPv4 loopback and must be accessed using an allowed local Host/Origin. It has no login and must not be exposed beyond the local machine. The configured `gui_name` resolves to loopback through intercepted DNS as well; use the numeric URL if DNS-over-HTTPS or another DNS path bypasses interception. A port conflict prevents capture from starting.
+With `--run`, the dashboard is available at `http://dns-shunt.local:53080` by default (or the configured `gui_name` and `gui_port`). The listener binds only to IPv4 loopback and must be accessed using an allowed local Host/Origin. It has no login and must not be exposed beyond the local machine. The configured `gui_name` resolves to loopback through intercepted DNS as well; use `http://127.0.0.1:53080` if DNS-over-HTTPS or another DNS path bypasses interception. A port conflict prevents capture from starting.
 
 User rules are stored as human-readable JSON in `%APPDATA%\dns-shunt\rules.json` on Windows. The browser can add, edit, and delete rules immediately; exact names precede wildcards, and wildcards match subdomains but not their apex. Only matching A/IN queries receive synthesized responses. Nonmatching names, AAAA queries, other classes, malformed DNS, and unsupported messages are immediately reinjected unchanged; unmatched traffic is neither correlated nor counted. The JSON store is validated in full before it is persisted and published. Corrupt or unreadable stores fail startup rather than silently disabling overrides. Aggregate override, fail-open, and error counters, uptime, and per-rule hit counts cover only the current run and are not written to disk; individual query names are never retained. TTL, GUI name, and HTTP port remain read-only TOML settings.
 

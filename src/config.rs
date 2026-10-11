@@ -4,7 +4,7 @@ use thiserror::Error;
 
 const DEFAULT_TTL: u32 = 60;
 pub const DEFAULT_GUI_NAME: &str = "dns-shunt.local";
-pub const DEFAULT_GUI_PORT: u16 = 8080;
+pub const DEFAULT_GUI_PORT: u16 = 53080;
 
 #[derive(Debug, Clone)]
 #[cfg_attr(not(any(target_os = "windows", test)), allow(dead_code))]
@@ -119,7 +119,8 @@ pub fn validate_rules(
         let address = Ipv4Addr::from_str(&input.address)
             .map_err(|_| ConfigError::RuleAddress(input.name.clone()))?;
         let ttl = input.ttl.unwrap_or(default_ttl);
-        validate_ttl(ttl).map_err(|_| ConfigError::RuleTtl(input.name.clone()))?;
+        validate_ttl(ttl)
+            .map_err(|_| ConfigError::RuleTtl(input.name.clone()))?;
         rules.push(Rule {
             name,
             wildcard,
@@ -131,7 +132,10 @@ pub fn validate_rules(
 }
 
 #[cfg_attr(not(any(target_os = "windows", test)), allow(dead_code))]
-pub fn lookup_rule<'a>(rules: &'a [Rule], query_name: &str) -> Option<&'a Rule> {
+pub fn lookup_rule<'a>(
+    rules: &'a [Rule],
+    query_name: &str,
+) -> Option<&'a Rule> {
     let name = query_name.trim_end_matches('.').to_ascii_lowercase();
     rules
         .iter()
@@ -142,7 +146,8 @@ pub fn lookup_rule<'a>(rules: &'a [Rule], query_name: &str) -> Option<&'a Rule> 
                 .filter(|rule| rule.wildcard && name.len() > rule.name.len())
                 .find(|rule| {
                     name.ends_with(&rule.name)
-                        && name.as_bytes().get(name.len() - rule.name.len() - 1) == Some(&b'.')
+                        && name.as_bytes().get(name.len() - rule.name.len() - 1)
+                            == Some(&b'.')
                 })
         })
 }
@@ -166,7 +171,9 @@ fn canonical_rule_name(input: &str) -> Result<(String, bool), ConfigError> {
     }
     let (name, wildcard) = match input.strip_prefix("*.") {
         Some(name) => (name, true),
-        None if input.contains('*') => return Err(ConfigError::RuleName(input.to_owned())),
+        None if input.contains('*') => {
+            return Err(ConfigError::RuleName(input.to_owned()));
+        }
         None => (input, false),
     };
     let name = name.trim_end_matches('.').to_ascii_lowercase();
@@ -244,8 +251,10 @@ mod tests {
 
     #[test]
     fn accepts_legacy_upstream_and_source_port_as_ignored_unknown_keys() {
-        let config =
-            Config::parse("upstream = \"not-an-ip\"\nsource_port = 53\nttl = 120\n").unwrap();
+        let config = Config::parse(
+            "upstream = \"not-an-ip\"\nsource_port = 53\nttl = 120\n",
+        )
+        .unwrap();
         assert_eq!(config.ttl, 120);
         assert_eq!(config.gui_name, DEFAULT_GUI_NAME);
     }
@@ -329,9 +338,14 @@ mod tests {
                 ttl: Some(0),
             },
         ] {
-            assert!(validate_rules(vec![input], "dns-shunt.local", 60).is_err());
+            assert!(
+                validate_rules(vec![input], "dns-shunt.local", 60).is_err()
+            );
         }
-        assert!(Config::parse(&format!("{BASE}\ngui_name=\"*.bad.example\"\n")).is_err());
+        assert!(
+            Config::parse(&format!("{BASE}\ngui_name=\"*.bad.example\"\n"))
+                .is_err()
+        );
         assert!(Config::parse(&format!("{BASE}\ngui_port=0\n")).is_err());
 
         let overlapping = vec![

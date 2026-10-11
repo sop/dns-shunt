@@ -43,14 +43,19 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             }
             "--run" => enable_capture = true,
             "--backend" => {
-                let value = args.next().ok_or("--backend requires wfp or windivert")?;
+                let value =
+                    args.next().ok_or("--backend requires wfp or windivert")?;
                 backend = Some(parse_backend(&value)?);
             }
             "--help" | "-h" => {
                 print_help();
                 return Ok(());
             }
-            _ => return Err(format!("unknown argument: {arg}; use --help").into()),
+            _ => {
+                return Err(
+                    format!("unknown argument: {arg}; use --help").into()
+                );
+            }
         }
     }
 
@@ -62,25 +67,34 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     if !enable_capture {
-        println!("capture is disabled; pass --run to enable the interception backend");
+        println!(
+            "capture is disabled; pass --run to enable the interception backend"
+        );
         return Ok(());
     }
 
     #[cfg(target_os = "windows")]
     {
         let rules_path = rules::default_store_path()?;
-        let rules = rules::RuleManager::load(rules_path, config.gui_name.clone(), config.ttl)?;
+        let rules = rules::RuleManager::load(
+            rules_path,
+            config.gui_name.clone(),
+            config.ttl,
+        )?;
         println!(
             "loaded {} web-managed override rule(s)",
             rules.snapshot().len()
         );
         let choice = selected_backend(backend);
-        let runtime = admin::RuntimeState::new(config.clone(), rules, choice.label());
+        let runtime =
+            admin::RuntimeState::new(config.clone(), rules, choice.label());
         let server = admin::AdminServer::bind(&runtime)?;
         println!("admin interface: http://127.0.0.1:{}", config.gui_port);
         let result = match choice {
             BackendChoice::Wfp => wfp_backend::run(config, runtime.clone()),
-            BackendChoice::WinDivert => windivert_backend::run(config, runtime.clone()),
+            BackendChoice::WinDivert => {
+                windivert_backend::run(config, runtime.clone())
+            }
         };
         runtime.stop();
         let server_result = server.join();
@@ -103,9 +117,17 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn print_help() {
-    println!(
-        "dns-shunt --config <path> [--run] [--backend windivert|wfp]\n\nValidate config by default. --run starts the loopback web admin and elevated capture (WinDivert by default). Rules are stored in the current user's application-data directory. Install its signed runtime assets with install-windivert.ps1.\nUse --backend wfp to select the experimental WFP backend; it requires an installed x64 callout driver, elevation, and a test-signing-enabled test machine for locally built drivers. Build the driver with the Windows Driver Kit (WDK)."
-    );
+    println!(concat!(
+        "dns-shunt --config <path> [--run] [--backend windivert|wfp]\n\n",
+        "Validate config by default. --run starts the loopback web admin ",
+        "and elevated capture (WinDivert by default). Rules are stored in ",
+        "the current user's application-data directory. Install its ",
+        "signed runtime assets with install-windivert.ps1.\n",
+        "Use --backend wfp to select the experimental WFP backend; it ",
+        "requires an installed x64 callout driver, elevation, and a ",
+        "test-signing-enabled test machine for locally built drivers. ",
+        "Build the driver with the Windows Driver Kit (WDK)."
+    ));
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -124,11 +146,16 @@ impl BackendChoice {
     }
 }
 
-fn parse_backend(value: &str) -> Result<BackendChoice, Box<dyn std::error::Error>> {
+fn parse_backend(
+    value: &str,
+) -> Result<BackendChoice, Box<dyn std::error::Error>> {
     match value {
         "wfp" => Ok(BackendChoice::Wfp),
         "windivert" => Ok(BackendChoice::WinDivert),
-        _ => Err(format!("invalid backend '{value}'; expected wfp or windivert").into()),
+        _ => Err(format!(
+            "invalid backend '{value}'; expected wfp or windivert"
+        )
+        .into()),
     }
 }
 

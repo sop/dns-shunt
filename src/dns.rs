@@ -42,10 +42,9 @@ pub fn parse_query(message: &[u8]) -> Result<Question, DnsError> {
         }
         let label = std::str::from_utf8(&message[offset..offset + length])
             .map_err(|_| DnsError::Malformed)?;
-        if !label
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
-        {
+        if !label.bytes().all(|byte| {
+            byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_'
+        }) {
             return Err(DnsError::Malformed);
         }
         labels.push(label.to_ascii_lowercase());
@@ -66,7 +65,9 @@ pub fn parse_query(message: &[u8]) -> Result<Question, DnsError> {
     let qclass = u16::from_be_bytes([message[offset + 2], message[offset + 3]]);
     let record_count = [6, 8, 10]
         .into_iter()
-        .map(|index| u16::from_be_bytes([message[index], message[index + 1]]) as usize)
+        .map(|index| {
+            u16::from_be_bytes([message[index], message[index + 1]]) as usize
+        })
         .sum::<usize>();
     let mut section_offset = offset + 4;
     for _ in 0..record_count {
@@ -74,8 +75,10 @@ pub fn parse_query(message: &[u8]) -> Result<Question, DnsError> {
         if section_offset + 10 > message.len() {
             return Err(DnsError::Malformed);
         }
-        let data_len =
-            u16::from_be_bytes([message[section_offset + 8], message[section_offset + 9]]) as usize;
+        let data_len = u16::from_be_bytes([
+            message[section_offset + 8],
+            message[section_offset + 9],
+        ]) as usize;
         section_offset += 10 + data_len;
         if section_offset > message.len() {
             return Err(DnsError::Malformed);
@@ -115,7 +118,8 @@ fn skip_name(message: &[u8], offset: usize) -> Result<usize, DnsError> {
                 cursor = end;
             }
             0xc0 => {
-                let low = *message.get(cursor + 1).ok_or(DnsError::Malformed)?;
+                let low =
+                    *message.get(cursor + 1).ok_or(DnsError::Malformed)?;
                 let target = (((length & 0x3f) as usize) << 8) | low as usize;
                 if target >= message.len() {
                     return Err(DnsError::Malformed);
@@ -139,7 +143,8 @@ pub fn build_a_response(
     }
     let mut question_end = 12;
     loop {
-        let length = *query.get(question_end).ok_or(DnsError::Malformed)? as usize;
+        let length =
+            *query.get(question_end).ok_or(DnsError::Malformed)? as usize;
         question_end += 1;
         if length == 0 {
             break;
@@ -191,8 +196,13 @@ mod tests {
     fn builds_a_response_preserving_id_and_question() {
         let original = query("example.com", 1);
         let question = parse_query(&original).unwrap();
-        let response =
-            build_a_response(&original, &question, Ipv4Addr::new(192, 0, 2, 42), 120).unwrap();
+        let response = build_a_response(
+            &original,
+            &question,
+            Ipv4Addr::new(192, 0, 2, 42),
+            120,
+        )
+        .unwrap();
         assert_eq!(&response[12..original.len()], &original[12..]);
         assert_eq!(&response[..2], &[0x12, 0x34]);
         assert_eq!(
@@ -211,7 +221,10 @@ mod tests {
         let message = query("example.com", 28);
         let question = parse_query(&message).unwrap();
         assert_eq!(question.qtype, 28);
-        assert!(build_a_response(&message, &question, Ipv4Addr::LOCALHOST, 60).is_err());
+        assert!(
+            build_a_response(&message, &question, Ipv4Addr::LOCALHOST, 60)
+                .is_err()
+        );
     }
 
     #[test]
@@ -220,8 +233,13 @@ mod tests {
         original[11] = 1;
         original.extend_from_slice(&[0, 0, 41, 4, 208, 0, 0, 0, 0, 0, 0]);
         let question = parse_query(&original).unwrap();
-        let response =
-            build_a_response(&original, &question, Ipv4Addr::new(192, 0, 2, 3), 60).unwrap();
+        let response = build_a_response(
+            &original,
+            &question,
+            Ipv4Addr::new(192, 0, 2, 3),
+            60,
+        )
+        .unwrap();
         assert_eq!(u16::from_be_bytes([response[10], response[11]]), 1);
         let answer_end = original.len() + 5;
         assert_eq!(&response[answer_end..], &original[original.len() - 11..]);
@@ -239,8 +257,12 @@ mod tests {
         );
         let mut malformed_additional = query("example.com", 1);
         malformed_additional[11] = 1;
-        malformed_additional.extend_from_slice(&[0, 0, 41, 4, 208, 0, 0, 0, 0, 0, 8]);
-        assert_eq!(parse_query(&malformed_additional), Err(DnsError::Malformed));
+        malformed_additional
+            .extend_from_slice(&[0, 0, 41, 4, 208, 0, 0, 0, 0, 0, 8]);
+        assert_eq!(
+            parse_query(&malformed_additional),
+            Err(DnsError::Malformed)
+        );
         let mut trailing_data = query("example.com", 1);
         trailing_data.push(0);
         assert_eq!(parse_query(&trailing_data), Err(DnsError::Malformed));

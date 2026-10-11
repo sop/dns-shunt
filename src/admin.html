@@ -1,0 +1,634 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>dns-shunt / control room</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        --bg: #101514;
+        --panel: #191f1d;
+        --line: #303a36;
+        --muted: #a5b3aa;
+        --ink: #edf4ec;
+        --acid: #c7f36b;
+        --orange: #e69b63;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      body {
+        margin: 0;
+        background:
+          radial-gradient(ellipse at 85% -10%, #324338 0, transparent 38%),
+          var(--bg);
+        color: var(--ink);
+        font: 15px/1.5 ui-monospace, SFMono-Regular, Consolas, monospace;
+      }
+
+      main {
+        max-width: 1160px;
+        margin: auto;
+        padding: 34px 24px 60px;
+      }
+
+      .top {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        border-bottom: 1px solid var(--line);
+        padding-bottom: 22px;
+      }
+
+      .brand {
+        color: var(--muted);
+        font-size: 14px;
+        letter-spacing: .14em;
+        text-transform: uppercase;
+      }
+
+      .brand b {
+        color: var(--acid);
+      }
+
+      h1 {
+        margin: 18px 0 8px;
+        font: 500 clamp(34px, 6vw, 64px)/1.05 system-ui, sans-serif;
+        letter-spacing: -.055em;
+      }
+
+      .lede {
+        margin: 0;
+        color: var(--muted);
+      }
+
+      .live {
+        padding: 7px 11px;
+        border: 1px solid #607742;
+        border-radius: 3px;
+        color: var(--acid);
+        font-size: 12px;
+      }
+
+      .grid {
+        display: grid;
+        grid-template-columns: repeat(4, 1fr);
+        gap: 12px;
+        margin: 30px 0;
+      }
+
+      .card,
+      .section {
+        border: 1px solid var(--line);
+        border-radius: 5px;
+        background: linear-gradient(145deg, #1c2420, #171c1a);
+      }
+
+      .card {
+        padding: 16px;
+      }
+
+      .label {
+        color: var(--muted);
+        font-size: 11px;
+        letter-spacing: .1em;
+        text-transform: uppercase;
+      }
+
+      .value {
+        margin-top: 10px;
+        font: 500 30px/1.25 system-ui, sans-serif;
+      }
+
+      .unit {
+        color: var(--muted);
+        font-size: 12px;
+      }
+
+      .layout {
+        display: grid;
+        grid-template-columns: minmax(0, 1.65fr) minmax(260px, .85fr);
+        gap: 14px;
+      }
+
+      .section {
+        padding: 20px;
+      }
+
+      .section h2 {
+        margin: 0 0 18px;
+        font: 500 20px system-ui, sans-serif;
+      }
+
+      .section-title {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+      }
+
+      .count {
+        color: var(--muted);
+        font-size: 12px;
+      }
+
+      form {
+        display: grid;
+        grid-template-columns: 1.2fr 1fr 100px auto;
+        gap: 8px;
+        margin-bottom: 16px;
+      }
+
+      input,
+      button {
+        min-width: 0;
+        padding: 10px;
+        border: 1px solid var(--line);
+        border-radius: 3px;
+        background: #0f1412;
+        color: var(--ink);
+        font: inherit;
+      }
+
+      input:focus {
+        outline: 1px solid var(--acid);
+      }
+
+      button {
+        border-color: var(--acid);
+        background: var(--acid);
+        color: #15200f;
+        font-weight: 700;
+        cursor: pointer;
+      }
+
+      button.cancel {
+        border-color: var(--line);
+        background: transparent;
+        color: var(--muted);
+      }
+
+      .form-actions {
+        display: flex;
+        gap: 8px;
+      }
+
+      button.delete {
+        padding: 5px 9px;
+        border-color: #714d41;
+        background: transparent;
+        color: #ff9b82;
+      }
+
+      button.move {
+        padding: 5px 8px;
+        border-color: var(--line);
+        background: transparent;
+        color: var(--muted);
+      }
+
+      button.move:disabled {
+        cursor: default;
+        opacity: .35;
+      }
+
+      td.actions {
+        white-space: nowrap;
+      }
+
+      table {
+        width: 100%;
+        border-collapse: collapse;
+        text-align: left;
+      }
+
+      th {
+        color: var(--muted);
+        font-size: 10px;
+        font-weight: 400;
+        letter-spacing: .1em;
+        text-transform: uppercase;
+      }
+
+      td,
+      th {
+        padding: 11px 8px;
+        border-bottom: 1px solid var(--line);
+      }
+
+      td {
+        font-size: 13px;
+      }
+
+      td.hit {
+        color: var(--acid);
+        text-align: right;
+        font-variant-numeric: tabular-nums;
+      }
+
+      .empty {
+        padding: 28px 8px;
+        color: var(--muted);
+        text-align: center;
+      }
+
+      .settings {
+        display: grid;
+        grid-template-columns: 1fr auto;
+        gap: 12px 8px;
+        font-size: 12px;
+      }
+
+      .settings dt {
+        color: var(--muted);
+      }
+
+      .settings dd {
+        margin: 0;
+        overflow-wrap: anywhere;
+        text-align: right;
+      }
+
+      .notice {
+        min-height: 22px;
+        color: var(--orange);
+        font-size: 12px;
+      }
+
+      .foot {
+        margin-top: 14px;
+        color: var(--muted);
+        font-size: 11px;
+      }
+
+      @media (max-width: 780px) {
+        main {
+          padding: 22px 14px;
+        }
+
+        .grid {
+          grid-template-columns: repeat(2, 1fr);
+        }
+
+        .layout {
+          grid-template-columns: 1fr;
+        }
+
+        form {
+          grid-template-columns: 1fr 1fr;
+        }
+
+        .settings dd {
+          max-width: 190px;
+        }
+      }
+
+      @media (max-width: 420px) {
+        form {
+          grid-template-columns: 1fr;
+        }
+
+        .section {
+          padding: 14px;
+        }
+
+        td,
+        th {
+          padding: 9px 4px;
+          font-size: 11px;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <div class="top">
+        <div class="brand"><b>dns-shunt</b> / local control room</div>
+        <div class="live" id="service">CONNECTING</div>
+      </div>
+
+      <h1>Route your names.</h1>
+      <p class="lede">Matched A/IN overrides only. Unmatched DNS passes
+        through unchanged.</p>
+
+      <div class="grid">
+        <div class="card">
+          <div class="label">Override answers</div>
+          <div class="value" id="overrides">0</div>
+        </div>
+        <div class="card">
+          <div class="label">Failed overrides</div>
+          <div class="value" id="failopen">0</div>
+        </div>
+        <div class="card">
+          <div class="label">Errors</div>
+          <div class="value" id="errors">0</div>
+        </div>
+        <div class="card">
+          <div class="label">Uptime</div>
+          <div class="value" id="uptime">0<span class="unit">s</span></div>
+        </div>
+      </div>
+
+      <div class="layout">
+        <section class="section">
+          <div class="section-title">
+            <h2>Override rules</h2>
+            <span class="count" id="rule-count">0 rules</span>
+          </div>
+
+          <form id="rule-form">
+            <input name="index" type="hidden">
+            <input name="name" placeholder="host.example or *.example" required>
+            <input name="address" placeholder="IPv4 address" required>
+            <input name="ttl" type="number" min="1" max="86400"
+              placeholder="TTL">
+            <div class="form-actions">
+              <button type="submit">Add rule +</button>
+              <button class="cancel" id="cancel-edit" type="button"
+                hidden>Cancel</button>
+            </div>
+          </form>
+
+          <div class="notice" id="notice"></div>
+          <div style="overflow-x: auto">
+            <table>
+              <thead>
+                <tr>
+                  <th>Pattern</th>
+                  <th>IPv4 answer</th>
+                  <th>TTL</th>
+                  <th style="text-align: right">Hits</th>
+                  <th>Order / actions</th>
+                </tr>
+              </thead>
+              <tbody id="rules"></tbody>
+            </table>
+          </div>
+
+          <p class="foot">Exact names win. Wildcards match subdomains, not
+            the apex.</p>
+        </section>
+
+        <aside class="section">
+          <h2>Service configuration</h2>
+          <dl class="settings" id="settings"></dl>
+          <p class="foot">Operational settings are read-only here and remain
+            TOML-owned.</p>
+        </aside>
+      </div>
+    </main>
+
+    <script>
+      const $ = id => document.getElementById(id);
+      let current = [];
+      let backend = '';
+      let uptimeBaseline = 0;
+      let uptimeStartedAt = 0;
+
+      function esc(value) {
+        return String(value).replace(/[&<>"']/g, character => ({
+          '&': '&amp;',
+          '<': '&lt;',
+          '>': '&gt;',
+          '"': '&quot;',
+          "'": '&#39;',
+        }[character]));
+      }
+
+      async function api(path, options = {}) {
+        const response = await fetch(path, {
+          ...options,
+          headers: {
+            'Content-Type': 'application/json',
+            ...(options.headers || {}),
+          },
+        });
+        const body = await response.json();
+
+        if (!response.ok) {
+          throw Error(body.error || response.statusText);
+        }
+
+        return body;
+      }
+
+      function showError(error) {
+        $('notice').textContent = error.message;
+      }
+
+      function renderUptime() {
+        const uptime = Math.floor(
+          uptimeBaseline + (performance.now() - uptimeStartedAt) / 1000
+        );
+        const seconds = uptime % 60;
+        const minutes = Math.floor(uptime / 60) % 60;
+        const hours = Math.floor(uptime / 3600) % 24;
+        const days = Math.floor(uptime / 86400);
+
+        if (uptime < 60) {
+          $('uptime').textContent = uptime + 's';
+        } else if (uptime < 3600) {
+          $('uptime').textContent =
+            Math.floor(uptime / 60) + 'm ' + seconds + 's';
+        } else if (uptime < 86400) {
+          $('uptime').textContent =
+            Math.floor(uptime / 3600) + 'h ' + minutes + 'm ' + seconds + 's';
+        } else {
+          $('uptime').textContent =
+            days + 'd ' + hours + 'h ' + minutes + 'm ' + seconds + 's';
+        }
+      }
+
+      function renderStatistics(stats) {
+        $('overrides').textContent = stats.overrides;
+        $('failopen').textContent = stats.fail_open;
+        $('errors').textContent = stats.errors;
+
+        if (stats.rule_hits) {
+          current.forEach((rule, index) => {
+            if (Object.hasOwn(stats.rule_hits, rule.name)) {
+              rule.hits = stats.rule_hits[rule.name];
+              const row = $('rules').children[index];
+              if (row) row.children[3].textContent = rule.hits;
+            }
+          });
+        }
+
+        if (stats.last_error) {
+          $('notice').textContent = 'Last error: ' + stats.last_error;
+        }
+      }
+
+      function renderRules(rules) {
+        current = rules;
+        $('rule-count').textContent = rules.length + ' rules';
+        $('rules').innerHTML = rules.length
+          ? rules.map((rule, index) =>
+            '<tr><td>' + esc(rule.name) +
+            '</td><td>' + esc(rule.address) +
+            '</td><td>' + rule.ttl + 's</td>' +
+            '<td class="hit">' + rule.hits + '</td>' +
+            '<td class="actions"><button class="move" data-index="' +
+            index + '" data-direction="up" aria-label="Move ' +
+            esc(rule.name) + ' up" ' +
+            (index === 0 ? 'disabled' : '') + '>↑</button> ' +
+            '<button class="move" data-index="' + index +
+            '" data-direction="down" aria-label="Move ' +
+            esc(rule.name) + ' down" ' +
+            (index === rules.length - 1 ? 'disabled' : '') + '>↓</button> ' +
+            '<button class="edit" data-index="' + index + '">Edit</button> ' +
+            '<button class="delete" data-index="' + index +
+            '" aria-label="Delete ' + esc(rule.name) + '">×</button>' +
+            '</td></tr>'
+          ).join('')
+          : '<tr><td class="empty" colspan="5">No overrides yet. ' +
+            'Add one above.</td></tr>';
+      }
+
+      async function loadRules() {
+        try {
+          renderRules(await api('/api/rules'));
+        } catch (error) {
+          showError(error);
+        }
+      }
+
+      async function loadInitial() {
+        try {
+          const [status, rules] = await Promise.all([
+            api('/api/status'),
+            api('/api/rules'),
+          ]);
+
+          backend = status.backend;
+          $('service').textContent =
+            status.service.toUpperCase() + ' · ' + backend;
+          uptimeBaseline = status.uptime_seconds;
+          uptimeStartedAt = performance.now();
+          renderUptime();
+          renderStatistics(status);
+
+          const settings = status.settings;
+          $('settings').innerHTML = [
+            ['Default TTL', settings.default_ttl + 's'],
+            ['GUI hostname', settings.gui_name],
+            ['HTTP port', settings.gui_port],
+            ['Rule store', settings.rules_path],
+          ].map(([key, value]) =>
+            '<dt>' + esc(key) + '</dt><dd>' + esc(value) + '</dd>'
+          ).join('');
+
+          renderRules(rules);
+        } catch (error) {
+          $('service').textContent = 'OFFLINE';
+          showError(error);
+        }
+      }
+
+      $('rules').addEventListener('click', async event => {
+        const button = event.target.closest('button');
+        if (!button) return;
+
+        const index = Number(button.dataset.index);
+        if (button.classList.contains('edit')) {
+          const rule = current[index];
+          const form = $('rule-form');
+          form.elements.index.value = index;
+          form.elements.name.value = rule.name;
+          form.elements.address.value = rule.address;
+          form.elements.ttl.value = rule.ttl;
+          form.querySelector('button[type=submit]').textContent =
+            'Save changes';
+          $('cancel-edit').hidden = false;
+          form.elements.name.focus();
+        } else if (button.classList.contains('delete')) {
+          try {
+            await api('/api/rules/' + index, { method: 'DELETE' });
+            $('notice').textContent = 'Rule removed';
+            await loadRules();
+          } catch (error) {
+            showError(error);
+          }
+        } else if (button.classList.contains('move')) {
+          const direction = button.dataset.direction;
+          try {
+            await api('/api/rules/reorder', {
+              method: 'POST',
+              body: JSON.stringify({
+                from: index,
+                to: index + (direction === 'up' ? -1 : 1),
+              }),
+            });
+            $('notice').textContent = 'Rule moved ' + direction;
+            await loadRules();
+          } catch (error) {
+            showError(error);
+          }
+        }
+      });
+
+      function resetRuleForm() {
+        const form = $('rule-form');
+        form.reset();
+        form.querySelector('[name="index"]').value = '';
+        form.querySelector('button[type=submit]').textContent = 'Add rule +';
+        $('cancel-edit').hidden = true;
+      }
+
+      $('cancel-edit').addEventListener('click', () => {
+        resetRuleForm();
+        $('notice').textContent = 'Edit cancelled';
+      });
+
+      $('rule-form').addEventListener('submit', async event => {
+        event.preventDefault();
+
+        const formElement = event.currentTarget;
+        const form = new FormData(formElement);
+        const index = form.get('index');
+        const body = {
+          name: form.get('name'),
+          address: form.get('address'),
+          ttl: form.get('ttl') ? Number(form.get('ttl')) : null,
+        };
+
+        try {
+          await api('/api/rules', {
+            method: index === '' ? 'POST' : 'PUT',
+            body: JSON.stringify(
+              index === '' ? body : { ...body, index: Number(index) }
+            ),
+          });
+          resetRuleForm();
+          $('notice').textContent = 'Rule saved and active';
+          await loadRules();
+        } catch (error) {
+          showError(error);
+        }
+      });
+
+      async function start() {
+        await loadInitial();
+        const events = new EventSource('/api/events');
+        events.addEventListener('stats', event =>
+          renderStatistics(JSON.parse(event.data))
+        );
+        events.addEventListener('rules-changed', loadRules);
+        events.onopen = () => {
+          $('service').textContent =
+            backend ? 'RUNNING · ' + backend : 'RUNNING';
+        };
+        events.onerror = () => {
+          $('service').textContent =
+            backend ? 'RECONNECTING · ' + backend : 'RECONNECTING';
+        };
+      }
+
+      start();
+      setInterval(renderUptime, 1000);
+    </script>
+  </body>
+</html>

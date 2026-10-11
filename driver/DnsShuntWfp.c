@@ -11,7 +11,8 @@
 #define DNS_SHUNT_POOL_TAG 'sDnD'
 #define IPV4_HEADER_SIZE 20u
 #define UDP_HEADER_SIZE 8u
-#define DNS_SHUNT_ALLOC(Size) ExAllocatePoolWithTag(NonPagedPoolNx, (Size), DNS_SHUNT_POOL_TAG)
+#define DNS_SHUNT_ALLOC(Size) \
+    ExAllocatePoolWithTag(NonPagedPoolNx, (Size), DNS_SHUNT_POOL_TAG)
 #define DNS_SHUNT_AF_INET 2
 #define DNS_SHUNT_IPPROTO_UDP 17
 
@@ -71,8 +72,10 @@ static VOID DnsShuntClassify(
     const FWPS_FILTER0* Filter,
     UINT64 FlowContext,
     FWPS_CLASSIFY_OUT0* ClassifyOut);
-static VOID DnsShuntInjectComplete(VOID* Context, NET_BUFFER_LIST* Nbl, BOOLEAN DispatchLevel);
-static VOID DnsShuntResponseComplete(VOID* Context, NET_BUFFER_LIST* Nbl, BOOLEAN DispatchLevel);
+static VOID DnsShuntInjectComplete(
+    VOID* Context, NET_BUFFER_LIST* Nbl, BOOLEAN DispatchLevel);
+static VOID DnsShuntResponseComplete(
+    VOID* Context, NET_BUFFER_LIST* Nbl, BOOLEAN DispatchLevel);
 static NTSTATUS DnsShuntInjectOriginal(_In_ DNS_SHUNT_PENDING* Pending);
 
 static VOID
@@ -126,7 +129,9 @@ DnsShuntFreeCapture(_In_opt_ DNS_SHUNT_CAPTURE* Capture)
 }
 
 static VOID
-DnsShuntReleasePending(_In_ DNS_SHUNT_PENDING* Pending, _In_ BOOLEAN DispatchLevel)
+DnsShuntReleasePending(
+    _In_ DNS_SHUNT_PENDING* Pending,
+    _In_ BOOLEAN DispatchLevel)
 {
     if (Pending->Counted) {
         KIRQL Irql;
@@ -147,7 +152,8 @@ DnsShuntFindPendingLocked(ULONGLONG Token)
 {
     PLIST_ENTRY Link;
     for (Link = gPending.Flink; Link != &gPending; Link = Link->Flink) {
-        DNS_SHUNT_PENDING* Pending = CONTAINING_RECORD(Link, DNS_SHUNT_PENDING, Link);
+        DNS_SHUNT_PENDING* Pending = CONTAINING_RECORD(
+            Link, DNS_SHUNT_PENDING, Link);
         if (Pending->Token == Token)
             return Pending;
     }
@@ -193,14 +199,17 @@ DnsShuntClassify(
         DnsShuntPermit(ClassifyOut);
         return;
     }
-    InjectionState = FwpsQueryPacketInjectionState0(gInjectionHandle, Nbl, NULL);
+    InjectionState = FwpsQueryPacketInjectionState0(
+        gInjectionHandle, Nbl, NULL);
     if (InjectionState == FWPS_PACKET_INJECTED_BY_SELF ||
         InjectionState == FWPS_PACKET_PREVIOUSLY_INJECTED_BY_SELF) {
         DnsShuntPermit(ClassifyOut);
         return;
     }
-    if (!FWPS_IS_METADATA_FIELD_PRESENT(Metadata, FWPS_METADATA_FIELD_TRANSPORT_ENDPOINT_HANDLE) ||
-        !FWPS_IS_METADATA_FIELD_PRESENT(Metadata, FWPS_METADATA_FIELD_COMPARTMENT_ID)) {
+    if (!FWPS_IS_METADATA_FIELD_PRESENT(
+            Metadata, FWPS_METADATA_FIELD_TRANSPORT_ENDPOINT_HANDLE) ||
+        !FWPS_IS_METADATA_FIELD_PRESENT(
+            Metadata, FWPS_METADATA_FIELD_COMPARTMENT_ID)) {
         DnsShuntPermit(ClassifyOut);
         return;
     }
@@ -226,16 +235,21 @@ DnsShuntClassify(
     if (PayloadLength > DNS_SHUNT_MAX_DNS_PAYLOAD)
         goto Permit;
 
-    SourceAddress = Values->incomingValue[FWPS_FIELD_OUTBOUND_TRANSPORT_V4_IP_LOCAL_ADDRESS].value.uint32;
-    DestinationAddress = Values->incomingValue[FWPS_FIELD_OUTBOUND_TRANSPORT_V4_IP_REMOTE_ADDRESS].value.uint32;
-    SourcePort = Values->incomingValue[FWPS_FIELD_OUTBOUND_TRANSPORT_V4_IP_LOCAL_PORT].value.uint16;
-    DestinationPort = Values->incomingValue[FWPS_FIELD_OUTBOUND_TRANSPORT_V4_IP_REMOTE_PORT].value.uint16;
+    SourceAddress = Values->incomingValue[
+        FWPS_FIELD_OUTBOUND_TRANSPORT_V4_IP_LOCAL_ADDRESS].value.uint32;
+    DestinationAddress = Values->incomingValue[
+        FWPS_FIELD_OUTBOUND_TRANSPORT_V4_IP_REMOTE_ADDRESS].value.uint32;
+    SourcePort = Values->incomingValue[
+        FWPS_FIELD_OUTBOUND_TRANSPORT_V4_IP_LOCAL_PORT].value.uint16;
+    DestinationPort = Values->incomingValue[
+        FWPS_FIELD_OUTBOUND_TRANSPORT_V4_IP_REMOTE_PORT].value.uint16;
     if (DestinationPort != 53)
         goto Permit;
 
     Pending = DNS_SHUNT_ALLOC(sizeof(*Pending));
     Capture = DNS_SHUNT_ALLOC(
-        FIELD_OFFSET(DNS_SHUNT_CAPTURE, Bytes) + sizeof(DNS_SHUNT_CAPTURE_HEADER) + PayloadLength);
+        FIELD_OFFSET(DNS_SHUNT_CAPTURE, Bytes) +
+        sizeof(DNS_SHUNT_CAPTURE_HEADER) + PayloadLength);
     if (Pending == NULL || Capture == NULL)
         goto Permit;
     RtlZeroMemory(Pending, sizeof(*Pending));
@@ -255,7 +269,8 @@ DnsShuntClassify(
 
     Capture->Length = sizeof(DNS_SHUNT_CAPTURE_HEADER) + PayloadLength;
     {
-        DNS_SHUNT_CAPTURE_HEADER* Header = (DNS_SHUNT_CAPTURE_HEADER*)Capture->Bytes;
+        DNS_SHUNT_CAPTURE_HEADER* Header =
+            (DNS_SHUNT_CAPTURE_HEADER*)Capture->Bytes;
         Header->Magic = DNS_SHUNT_PROTOCOL_MAGIC;
         Header->Version = DNS_SHUNT_PROTOCOL_VERSION;
         Header->HeaderLength = (UINT16)sizeof(*Header);
@@ -267,7 +282,10 @@ DnsShuntClassify(
         Header->SourcePort = SourcePort;
         Header->DestinationPort = DestinationPort;
         if (PayloadLength != 0)
-            RtlCopyMemory(Capture->Bytes + sizeof(*Header), PacketBytes + UDP_HEADER_SIZE, PayloadLength);
+            RtlCopyMemory(
+                Capture->Bytes + sizeof(*Header),
+                PacketBytes + UDP_HEADER_SIZE,
+                PayloadLength);
     }
 
     KeAcquireSpinLock(&gLock, &Irql);
@@ -307,7 +325,8 @@ Permit:
 }
 
 static VOID
-DnsShuntInjectComplete(VOID* Context, NET_BUFFER_LIST* Nbl, BOOLEAN DispatchLevel)
+DnsShuntInjectComplete(
+    VOID* Context, NET_BUFFER_LIST* Nbl, BOOLEAN DispatchLevel)
 {
     DNS_SHUNT_PENDING* Pending = (DNS_SHUNT_PENDING*)Context;
     if (!NT_SUCCESS(NET_BUFFER_LIST_STATUS(Nbl)) && Pending->RetryCount == 0) {
@@ -333,14 +352,16 @@ DnsShuntInjectOriginal(_In_ DNS_SHUNT_PENDING* Pending)
     FWPS_TRANSPORT_SEND_PARAMS0 SendParams;
     NTSTATUS Status;
     RtlZeroMemory(&SendParams, sizeof(SendParams));
-    Status = FwpsAllocateCloneNetBufferList0(Pending->OriginalNbl, NULL, NULL, 0, &Clone);
+    Status = FwpsAllocateCloneNetBufferList0(
+        Pending->OriginalNbl, NULL, NULL, 0, &Clone);
     if (!NT_SUCCESS(Status))
         return Status;
     SendParams.remoteAddress = (UINT8*)&Pending->RemoteAddress;
     DnsShuntBeginInjection();
     Status = FwpsInjectTransportSendAsync0(
         gInjectionHandle, NULL, Pending->EndpointHandle, 0, &SendParams,
-        DNS_SHUNT_AF_INET, Pending->CompartmentId, Clone, DnsShuntInjectComplete, Pending);
+        DNS_SHUNT_AF_INET, Pending->CompartmentId, Clone,
+        DnsShuntInjectComplete, Pending);
     if (!NT_SUCCESS(Status)) {
         FwpsFreeCloneNetBufferList0(Clone, 0);
         DnsShuntEndInjection();
@@ -349,8 +370,10 @@ DnsShuntInjectOriginal(_In_ DNS_SHUNT_PENDING* Pending)
 }
 
 static NTSTATUS
-DnsShuntInjectResponse(_In_ DNS_SHUNT_PENDING* Pending, _In_reads_bytes_(PayloadLength) const UCHAR* Payload,
-                       _In_ ULONG PayloadLength)
+DnsShuntInjectResponse(
+    _In_ DNS_SHUNT_PENDING* Pending,
+    _In_reads_bytes_(PayloadLength) const UCHAR* Payload,
+    _In_ ULONG PayloadLength)
 {
     ULONG TotalLength = IPV4_HEADER_SIZE + UDP_HEADER_SIZE + PayloadLength;
     ULONG UdpLength = UDP_HEADER_SIZE + PayloadLength;
@@ -415,14 +438,16 @@ DnsShuntInjectResponse(_In_ DNS_SHUNT_PENDING* Pending, _In_reads_bytes_(Payload
     Udp[6] = (UCHAR)(UdpChecksum >> 8);
     Udp[7] = (UCHAR)UdpChecksum;
 
-    Injection->Mdl = IoAllocateMdl(Injection->Bytes, TotalLength, FALSE, FALSE, NULL);
+    Injection->Mdl = IoAllocateMdl(
+        Injection->Bytes, TotalLength, FALSE, FALSE, NULL);
     if (Injection->Mdl == NULL) {
         ExFreePoolWithTag(Injection->Bytes, DNS_SHUNT_POOL_TAG);
         ExFreePoolWithTag(Injection, DNS_SHUNT_POOL_TAG);
         return STATUS_INSUFFICIENT_RESOURCES;
     }
     MmBuildMdlForNonPagedPool(Injection->Mdl);
-    Injection->Nbl = NdisAllocateNetBufferAndNetBufferList(gNblPool, 0, 0, Injection->Mdl, 0, TotalLength);
+    Injection->Nbl = NdisAllocateNetBufferAndNetBufferList(
+        gNblPool, 0, 0, Injection->Mdl, 0, TotalLength);
     if (Injection->Nbl == NULL) {
         IoFreeMdl(Injection->Mdl);
         ExFreePoolWithTag(Injection->Bytes, DNS_SHUNT_POOL_TAG);
@@ -432,7 +457,8 @@ DnsShuntInjectResponse(_In_ DNS_SHUNT_PENDING* Pending, _In_reads_bytes_(Payload
     Injection->Pending = Pending;
     DnsShuntBeginInjection();
     Status = FwpsInjectTransportReceiveAsync0(
-        gInjectionHandle, NULL, NULL, 0, DNS_SHUNT_AF_INET, Pending->CompartmentId,
+        gInjectionHandle, NULL, NULL, 0, DNS_SHUNT_AF_INET,
+        Pending->CompartmentId,
         Pending->InterfaceIndex, Pending->SubInterfaceIndex,
         Injection->Nbl, DnsShuntResponseComplete, Injection);
     if (!NT_SUCCESS(Status)) {
@@ -446,7 +472,8 @@ DnsShuntInjectResponse(_In_ DNS_SHUNT_PENDING* Pending, _In_reads_bytes_(Payload
 }
 
 static VOID
-DnsShuntResponseComplete(VOID* Context, NET_BUFFER_LIST* Nbl, BOOLEAN DispatchLevel)
+DnsShuntResponseComplete(
+    VOID* Context, NET_BUFFER_LIST* Nbl, BOOLEAN DispatchLevel)
 {
     DNS_SHUNT_INJECTION* Injection = (DNS_SHUNT_INJECTION*)Context;
     DNS_SHUNT_PENDING* Pending = Injection->Pending;
@@ -465,7 +492,9 @@ DnsShuntResponseComplete(VOID* Context, NET_BUFFER_LIST* Nbl, BOOLEAN DispatchLe
 }
 
 static NTSTATUS
-DnsShuntResolve(_In_reads_bytes_(InputLength) const UCHAR* Input, _In_ ULONG InputLength)
+DnsShuntResolve(
+    _In_reads_bytes_(InputLength) const UCHAR* Input,
+    _In_ ULONG InputLength)
 {
     const DNS_SHUNT_COMMAND_HEADER* Header;
     DNS_SHUNT_PENDING* Pending;
@@ -475,12 +504,16 @@ DnsShuntResolve(_In_reads_bytes_(InputLength) const UCHAR* Input, _In_ ULONG Inp
     if (InputLength < sizeof(DNS_SHUNT_COMMAND_HEADER))
         return STATUS_BUFFER_TOO_SMALL;
     Header = (const DNS_SHUNT_COMMAND_HEADER*)Input;
-    if (Header->Magic != DNS_SHUNT_PROTOCOL_MAGIC || Header->Version != DNS_SHUNT_PROTOCOL_VERSION ||
-        Header->TotalLength != InputLength || Header->PayloadLength > DNS_SHUNT_MAX_DNS_PAYLOAD ||
+    if (Header->Magic != DNS_SHUNT_PROTOCOL_MAGIC ||
+        Header->Version != DNS_SHUNT_PROTOCOL_VERSION ||
+        Header->TotalLength != InputLength ||
+        Header->PayloadLength > DNS_SHUNT_MAX_DNS_PAYLOAD ||
         Header->TotalLength != sizeof(*Header) + Header->PayloadLength)
         return STATUS_INVALID_PARAMETER;
-    Expected = (Header->Command == DNS_SHUNT_COMMAND_RESPONSE) ? Header->PayloadLength : 0;
-    if ((Header->Command != DNS_SHUNT_COMMAND_REINJECT && Header->Command != DNS_SHUNT_COMMAND_RESPONSE) ||
+    Expected = (Header->Command == DNS_SHUNT_COMMAND_RESPONSE)
+        ? Header->PayloadLength : 0;
+    if ((Header->Command != DNS_SHUNT_COMMAND_REINJECT &&
+         Header->Command != DNS_SHUNT_COMMAND_RESPONSE) ||
         Expected != Header->PayloadLength)
         return STATUS_INVALID_PARAMETER;
 
@@ -498,7 +531,8 @@ DnsShuntResolve(_In_reads_bytes_(InputLength) const UCHAR* Input, _In_ ULONG Inp
     if (Header->Command == DNS_SHUNT_COMMAND_REINJECT)
         Status = DnsShuntInjectOriginal(Pending);
     else
-        Status = DnsShuntInjectResponse(Pending, Input + sizeof(*Header), Header->PayloadLength);
+        Status = DnsShuntInjectResponse(
+            Pending, Input + sizeof(*Header), Header->PayloadLength);
     if (!NT_SUCCESS(Status)) {
         BOOLEAN FailOpen = FALSE;
         KeAcquireSpinLock(&gLock, &Irql);
@@ -530,7 +564,8 @@ DnsShuntRead(_Inout_ PIRP Irp, _In_ ULONG OutputLength)
     for (;;) {
         if (Irp->Cancel)
             return STATUS_CANCELLED;
-        Status = KeWaitForSingleObject(&gCaptureAvailable, Executive, KernelMode, FALSE, &Timeout);
+        Status = KeWaitForSingleObject(
+            &gCaptureAvailable, Executive, KernelMode, FALSE, &Timeout);
         if (Status != STATUS_SUCCESS && Status != STATUS_TIMEOUT)
             return Status;
         KeAcquireSpinLock(&gLock, &Irql);
@@ -543,7 +578,10 @@ DnsShuntRead(_Inout_ PIRP Irp, _In_ ULONG OutputLength)
                 DnsShuntFreeCapture(Capture);
                 return STATUS_BUFFER_TOO_SMALL;
             }
-            RtlCopyMemory(Irp->AssociatedIrp.SystemBuffer, Capture->Bytes, Capture->Length);
+            RtlCopyMemory(
+                Irp->AssociatedIrp.SystemBuffer,
+                Capture->Bytes,
+                Capture->Length);
             Irp->IoStatus.Information = Capture->Length;
             DnsShuntFreeCapture(Capture);
             return STATUS_SUCCESS;
@@ -579,7 +617,8 @@ DnsShuntCleanup(_In_ PIRP Irp)
     InterlockedExchange(&gStopping, 1);
     if (InterlockedExchange(&gShutdownWakePosted, 1) == 0)
         KeReleaseSemaphore(&gCaptureAvailable, IO_NO_INCREMENT, 1, FALSE);
-    KeWaitForSingleObject(&gNoInflightInjection, Executive, KernelMode, FALSE, NULL);
+    KeWaitForSingleObject(
+        &gNoInflightInjection, Executive, KernelMode, FALSE, NULL);
     KeAcquireSpinLock(&gLock, &Irql);
     while (!IsListEmpty(&gPending))
         InsertTailList(&PendingList, RemoveHeadList(&gPending));
@@ -587,17 +626,22 @@ DnsShuntCleanup(_In_ PIRP Irp)
         InsertTailList(&CaptureList, RemoveHeadList(&gCaptures));
     KeReleaseSpinLock(&gLock, Irql);
     Timeout.QuadPart = 0;
-    while (KeWaitForSingleObject(&gCaptureAvailable, Executive, KernelMode, FALSE, &Timeout) == STATUS_SUCCESS) {}
+    while (KeWaitForSingleObject(
+        &gCaptureAvailable, Executive, KernelMode, FALSE, &Timeout)
+        == STATUS_SUCCESS) {}
     while (!IsListEmpty(&CaptureList)) {
-        DNS_SHUNT_CAPTURE* Capture = CONTAINING_RECORD(RemoveHeadList(&CaptureList), DNS_SHUNT_CAPTURE, Link);
+        DNS_SHUNT_CAPTURE* Capture = CONTAINING_RECORD(
+            RemoveHeadList(&CaptureList), DNS_SHUNT_CAPTURE, Link);
         DnsShuntFreeCapture(Capture);
     }
     while (!IsListEmpty(&PendingList)) {
-        DNS_SHUNT_PENDING* Pending = CONTAINING_RECORD(RemoveHeadList(&PendingList), DNS_SHUNT_PENDING, Link);
+        DNS_SHUNT_PENDING* Pending = CONTAINING_RECORD(
+            RemoveHeadList(&PendingList), DNS_SHUNT_PENDING, Link);
         if (!NT_SUCCESS(DnsShuntInjectOriginal(Pending)))
             DnsShuntReleasePending(Pending, FALSE);
     }
-    KeWaitForSingleObject(&gNoInflightInjection, Executive, KernelMode, FALSE, NULL);
+    KeWaitForSingleObject(
+        &gNoInflightInjection, Executive, KernelMode, FALSE, NULL);
     InterlockedExchange(&gControllerOpen, 0);
 }
 
@@ -625,14 +669,17 @@ DnsShuntDispatch(_In_ PDEVICE_OBJECT DeviceObject, _Inout_ PIRP Irp)
         Information = Irp->IoStatus.Information;
         break;
     case IRP_MJ_DEVICE_CONTROL:
-        if (Stack->Parameters.DeviceIoControl.IoControlCode == IOCTL_DNS_SHUNT_RESOLVE) {
+        if (Stack->Parameters.DeviceIoControl.IoControlCode ==
+            IOCTL_DNS_SHUNT_RESOLVE) {
             Status = DnsShuntResolve(
                 (const UCHAR*)Irp->AssociatedIrp.SystemBuffer,
                 Stack->Parameters.DeviceIoControl.InputBufferLength);
-        } else if (Stack->Parameters.DeviceIoControl.IoControlCode == IOCTL_DNS_SHUNT_SHUTDOWN) {
+        } else if (Stack->Parameters.DeviceIoControl.IoControlCode ==
+                   IOCTL_DNS_SHUNT_SHUTDOWN) {
             InterlockedExchange(&gStopping, 1);
             if (InterlockedExchange(&gShutdownWakePosted, 1) == 0)
-                KeReleaseSemaphore(&gCaptureAvailable, IO_NO_INCREMENT, 1, FALSE);
+                KeReleaseSemaphore(
+                    &gCaptureAvailable, IO_NO_INCREMENT, 1, FALSE);
             Status = STATUS_SUCCESS;
         }
         break;
@@ -690,7 +737,8 @@ DriverEntry(_In_ PDRIVER_OBJECT DriverObject, _In_ PUNICODE_STRING RegistryPath)
     DriverObject->DriverUnload = DnsShuntUnload;
 
     Status = IoCreateDeviceSecure(
-        DriverObject, 0, &DeviceName, FILE_DEVICE_UNKNOWN, FILE_DEVICE_SECURE_OPEN,
+        DriverObject, 0, &DeviceName, FILE_DEVICE_UNKNOWN,
+        FILE_DEVICE_SECURE_OPEN,
         FALSE, &Sddl, NULL, &gDeviceObject);
     if (!NT_SUCCESS(Status))
         return Status;
@@ -702,7 +750,8 @@ DriverEntry(_In_ PDRIVER_OBJECT DriverObject, _In_ PUNICODE_STRING RegistryPath)
     RtlZeroMemory(&PoolParameters, sizeof(PoolParameters));
     PoolParameters.Header.Type = NDIS_OBJECT_TYPE_DEFAULT;
     PoolParameters.Header.Revision = NET_BUFFER_LIST_POOL_PARAMETERS_REVISION_1;
-    PoolParameters.Header.Size = NDIS_SIZEOF_NET_BUFFER_LIST_POOL_PARAMETERS_REVISION_1;
+    PoolParameters.Header.Size =
+        NDIS_SIZEOF_NET_BUFFER_LIST_POOL_PARAMETERS_REVISION_1;
     PoolParameters.ProtocolId = NDIS_PROTOCOL_ID_DEFAULT;
     PoolParameters.fAllocateNetBuffer = TRUE;
     PoolParameters.PoolTag = DNS_SHUNT_POOL_TAG;
@@ -711,7 +760,9 @@ DriverEntry(_In_ PDRIVER_OBJECT DriverObject, _In_ PUNICODE_STRING RegistryPath)
         Status = STATUS_INSUFFICIENT_RESOURCES;
         goto Failure;
     }
-    Status = FwpsInjectionHandleCreate0(DNS_SHUNT_AF_INET, FWPS_INJECTION_TYPE_TRANSPORT, &gInjectionHandle);
+    Status = FwpsInjectionHandleCreate0(
+        DNS_SHUNT_AF_INET, FWPS_INJECTION_TYPE_TRANSPORT,
+        &gInjectionHandle);
     if (!NT_SUCCESS(Status))
         goto Failure;
     Status = DnsShuntRegisterCallout(gDeviceObject);
