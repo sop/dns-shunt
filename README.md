@@ -9,8 +9,8 @@ WinDivert inspects only outbound, non-loopback IPv4 UDP DNS packets to port 53. 
 - Rust stable with the MSVC toolchain for native Windows builds.
 - Windows 10/11 x64 to run packet interception.
 - Administrator privileges to start interception.
-- Elevated PowerShell to install or uninstall the Windows service.
-- The signed WinDivert runtime assets installed by `install-windivert.ps1`.
+- The signed WinDivert runtime assets installed by `install-windivert.ps1` for
+  manual foreground capture.
 
 The scripts in this repository do not modify adapter DNS or resolver selection.
 
@@ -25,6 +25,31 @@ cargo test
 cargo clippy --all-targets -- -D warnings
 cargo build --release
 ```
+
+## Build The Windows Installer
+
+Build the machine-wide service installer on a Windows x64 host with the Rust
+x86_64 MSVC toolchain and Inno Setup 6.3+ or 7 installed. Run from any
+directory:
+
+```powershell
+.\scripts\build-installer.ps1
+```
+
+The script builds the `x86_64-pc-windows-msvc` release, downloads or reuses the
+pinned WinDivert 2.2.2 x64 archive, checks its SHA-256 and driver signature,
+then compiles `dist\dns-shunt-setup.exe`. Staged files and the archive cache
+are isolated under `dist\`; the workflow does not modify
+`target\debug`/`target\release` runtime assets or stop an active WinDivert
+driver.
+
+The installer requires administrator privileges and Windows 10/11 x64. Before
+installing or starting the automatic `LocalSystem` service, setup explains
+that installation enables machine-wide DNS capture and asks for explicit
+consent. It does not change adapter DNS settings or resolver selection. The
+target computer does not need PowerShell. Uninstall stops and removes the
+service and installer-owned files while preserving
+`%ProgramData%\dns-shunt\config.toml` and `rules.json`.
 
 The Windows release executable is `target\release\dns-shunt.exe`. Run it directly to validate a configuration or start capture:
 
@@ -82,16 +107,24 @@ Foreground user rules are stored as human-readable JSON in `%APPDATA%\dns-shunt\
 
 ## Windows Service
 
-The service runs one machine-wide capture process as `LocalSystem`; it starts at boot without a user session. Installing it from an elevated PowerShell session is the administrator's explicit opt-in. It uses WinDivert and the fixed ProgramData config/rules paths.
-
-Build the release executable and install the service from an elevated PowerShell at the repository root:
+The service runs one machine-wide capture process as `LocalSystem`; it starts
+at boot without a user session. Installing it through the Inno Setup package is
+the administrator's explicit opt-in. The native service-management commands
+are also available for administrative repair or automation:
 
 ```powershell
-cargo build --release
-.\install-service.ps1
+.\target\release\dns-shunt.exe --install-service
+.\target\release\dns-shunt.exe --stop-service
+.\target\release\dns-shunt.exe --uninstall-service
 ```
 
-The installer stages the executable and signed WinDivert runtime assets under `%ProgramFiles%\dns-shunt`, creates `%ProgramData%\dns-shunt` with write access for SYSTEM and Administrators, seeds `config.toml` from the example only when absent, validates it, and creates/starts an automatic `LocalSystem` service. Check status and startup diagnostics with:
+Each command requires an elevated administrator. Installation creates
+`%ProgramData%\dns-shunt`, sets access for SYSTEM and Administrators, seeds
+`config.toml` only when absent, validates it, registers the `Dns-Shunt` Event
+Log source, and creates or updates and starts the automatic service. The
+installer package stages the executable, signed WinDivert runtime, and example
+configuration under `%ProgramFiles%\dns-shunt`. Check status and startup
+diagnostics with:
 
 ```powershell
 Get-Service DnsShunt
@@ -104,14 +137,16 @@ rule changes affect all users on the computer because the TOML and JSON rule
 files are shared under `%ProgramData%`. The service does not modify adapter
 DNS settings or Windows resolver selection.
 
-Stop the service through SCM, or uninstall it from an elevated PowerShell:
+Stop the service through SCM or the native command, or remove it through
+Windows Apps > Installed apps:
 
 ```powershell
-Stop-Service DnsShunt
-.\uninstall-service.ps1
+.\target\release\dns-shunt.exe --stop-service
 ```
 
-Uninstall stops/deletes the service and removes its installed binaries. It preserves `%ProgramData%\dns-shunt` configuration and rules by default. Confirm ordinary DNS resumes after stopping the service.
+Uninstall stops/deletes the service and removes its installed binaries and
+Event Log registration. It preserves `%ProgramData%\dns-shunt` configuration
+and rules. Confirm ordinary DNS resumes after stopping the service.
 
 Run commands from an elevated terminal. `--help` prints the available options and prerequisites.
 

@@ -42,6 +42,12 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         print_help();
         return Ok(());
     }
+    if let Some(command) = arguments.service_command {
+        #[cfg(target_os = "windows")]
+        return service::manage(command);
+        #[cfg(not(target_os = "windows"))]
+        return Err("service management is supported on Windows only".into());
+    }
     let config_path = arguments.config_path;
     let enable_capture = arguments.enable_capture;
     let service_mode = arguments.service_mode;
@@ -82,7 +88,15 @@ struct Arguments {
     config_path: Option<PathBuf>,
     enable_capture: bool,
     service_mode: bool,
+    service_command: Option<ServiceCommand>,
     help: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ServiceCommand {
+    Stop,
+    Install,
+    Uninstall,
 }
 
 fn parse_arguments(
@@ -91,6 +105,8 @@ fn parse_arguments(
     let mut config_path = None;
     let mut enable_capture = false;
     let mut service_mode = false;
+    let mut service_command = None;
+    let mut service_command_count = 0;
     let mut help = false;
     let mut args = args.into_iter();
 
@@ -102,6 +118,18 @@ fn parse_arguments(
             }
             "--run" => enable_capture = true,
             "--service" => service_mode = true,
+            "--stop-service" => {
+                service_command = Some(ServiceCommand::Stop);
+                service_command_count += 1;
+            }
+            "--install-service" => {
+                service_command = Some(ServiceCommand::Install);
+                service_command_count += 1;
+            }
+            "--uninstall-service" => {
+                service_command = Some(ServiceCommand::Uninstall);
+                service_command_count += 1;
+            }
             "--help" | "-h" => help = true,
             _ => {
                 return Err(format!("unknown argument: {arg}; use --help").into());
@@ -109,13 +137,21 @@ fn parse_arguments(
         }
     }
 
-    if service_mode && (config_path.is_some() || enable_capture) {
+    let has_management_command = service_command.is_some();
+    if service_command_count > 1 {
+        return Err("only one service-management command may be specified".into());
+    }
+    if service_mode && (config_path.is_some() || enable_capture || has_management_command) {
         return Err("--service cannot be combined with other options".into());
+    }
+    if has_management_command && (config_path.is_some() || enable_capture) {
+        return Err("service-management commands cannot be combined with other options".into());
     }
     Ok(Arguments {
         config_path,
         enable_capture,
         service_mode,
+        service_command,
         help,
     })
 }
@@ -161,10 +197,11 @@ fn print_help() {
     println!(concat!(
         "dns-shunt --config <path> [--run]\n",
         "dns-shunt --service (Windows Service Control Manager only)\n\n",
+        "dns-shunt --stop-service | --install-service | --uninstall-service\n\n",
         "Validate config by default. --run starts the loopback web admin ",
         "and elevated WinDivert capture. Rules are stored in ",
-        "the current user's application-data directory. Install its ",
-        "signed runtime assets with install-windivert.ps1."
+        "the current user's application-data directory. Service management ",
+        "requires an elevated administrator."
     ));
 }
 
@@ -187,6 +224,39 @@ mod tests {
             ])
             .is_err()
         );
+    }
+
+    #[test]
+    fn service_management_commands_are_exclusive() {
+        assert_eq!(
+            parse_arguments(["--install-service".to_owned()])
+                .unwrap()
+                .service_command,
+            Some(ServiceCommand::Install)
+        );
+        assert_eq!(
+            parse_arguments(["--stop-service".to_owned()])
+                .unwrap()
+                .service_command,
+            Some(ServiceCommand::Stop)
+        );
+        assert_eq!(
+            parse_arguments(["--uninstall-service".to_owned()])
+                .unwrap()
+                .service_command,
+            Some(ServiceCommand::Uninstall)
+        );
+        assert!(
+            parse_arguments([
+                "--install-service".to_owned(),
+                "--uninstall-service".to_owned(),
+            ])
+            .is_err()
+        );
+        assert!(
+            parse_arguments(["--install-service".to_owned(), "--service".to_owned(),]).is_err()
+        );
+        assert!(parse_arguments(["--install-service".to_owned(), "--run".to_owned(),]).is_err());
     }
 
     #[cfg(target_os = "windows")]
