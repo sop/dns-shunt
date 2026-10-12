@@ -238,7 +238,7 @@ pub fn run(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let driver = WinDivertDriver::open(WIN_DIVERT_FILTER)?;
     if console_mode {
-        println!("WinDivert capture active; Ctrl+C stops the foreground prototype");
+        println!("WinDivert capture active; Ctrl+C stops the foreground process");
     }
     backend::run_proxy(
         Arc::new(WinDivertBackend {

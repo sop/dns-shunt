@@ -1,6 +1,6 @@
 # dns-shunt
 
-`dns-shunt` is a Windows DNS override prototype with both foreground and Windows service modes. It synthesizes answers only for matching A/IN records managed through a local web interface. All other DNS packets are passed through unchanged to the resolver Windows selected; the application does not select, configure, or proxy to a resolver. It does not change adapter DNS settings. Capture is opt-in: foreground capture requires `--run`, while installing the automatic-start service is the machine-wide opt-in. WinDivert is the packet interception backend.
+`dns-shunt` is a production-ready Windows DNS override with foreground and Windows service modes. It synthesizes answers only for matching A/IN records managed through a local web interface. All other DNS packets are passed through unchanged to the resolver Windows selected; the application does not select, configure, or proxy to a resolver. It does not change adapter DNS settings. Capture is opt-in: foreground capture requires `--run`, while installing the automatic-start service is the machine-wide opt-in. WinDivert is the packet interception backend.
 
 WinDivert inspects only outbound, non-loopback IPv4 UDP DNS packets to port 53. IPv6, TCP/53, inbound DNS, and loopback traffic are outside the interception scope.
 
