@@ -31,6 +31,7 @@ pub struct RuntimeState {
     ready_callback: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
     error_callback: Mutex<Option<ErrorCallback>>,
     overrides: AtomicU64,
+    builtin_hits: AtomicU64,
     fail_open: AtomicU64,
     errors: AtomicU64,
     rule_hits: Mutex<HashMap<String, u64>>,
@@ -59,6 +60,7 @@ impl RuntimeState {
             ready_callback: Mutex::new(None),
             error_callback: Mutex::new(None),
             overrides: AtomicU64::new(0),
+            builtin_hits: AtomicU64::new(0),
             fail_open: AtomicU64::new(0),
             errors: AtomicU64::new(0),
             rule_hits: Mutex::new(HashMap::new()),
@@ -152,6 +154,7 @@ impl RuntimeState {
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
             self.overrides.fetch_add(1, Ordering::Relaxed);
+            self.builtin_hits.fetch_add(1, Ordering::Relaxed);
         }
         self.notify_stats_changed();
     }
@@ -219,6 +222,7 @@ impl RuntimeState {
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         json!({
             "overrides": self.overrides.load(Ordering::Relaxed),
+            "builtin_hits": self.builtin_hits.load(Ordering::Relaxed),
             "fail_open": self.fail_open.load(Ordering::Relaxed),
             "errors": self.errors.load(Ordering::Relaxed),
             "last_error": self
@@ -240,6 +244,7 @@ impl RuntimeState {
             "uptime_seconds": self.started.elapsed().as_secs(),
             "backend": self.backend,
             "overrides": self.overrides.load(Ordering::Relaxed),
+            "builtin_hits": self.builtin_hits.load(Ordering::Relaxed),
             "fail_open": self.fail_open.load(Ordering::Relaxed),
             "errors": self.errors.load(Ordering::Relaxed),
             "last_error": self
@@ -1119,6 +1124,7 @@ mod tests {
         state.record_override(&rule);
         let status = state.status();
         assert_eq!(status["overrides"], 1);
+        assert_eq!(status["builtin_hits"], 0);
         assert!(status.get("forwarded").is_none());
         assert!(status["settings"].get("upstream").is_none());
         assert!(status["settings"].get("source_port").is_none());
@@ -1154,6 +1160,8 @@ mod tests {
         assert_eq!(events.stats_version, 4);
         let snapshot = state.statistics_snapshot();
         assert_eq!(snapshot["overrides"], 2);
+        assert_eq!(snapshot["builtin_hits"], 1);
+        assert_eq!(state.status()["builtin_hits"], 1);
         assert_eq!(snapshot["fail_open"], 1);
         assert_eq!(snapshot["errors"], 1);
         assert_eq!(snapshot["last_error"], "test error");

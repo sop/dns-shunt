@@ -310,8 +310,8 @@
         <div class="live" id="service">CONNECTING</div>
       </div>
 
-      <h1>Route your names.</h1>
-      <p class="lede">Matched A/IN overrides only. Unmatched DNS passes
+      <h1>Override your DNS queries</h1>
+      <p class="lede">Modifies only matched queries. Unmatched DNS is passed
         through unchanged.</p>
 
       <div class="grid">
@@ -389,6 +389,9 @@
       let uptimeBaseline = 0;
       let uptimeStartedAt = 0;
       let dashboardConnected = false;
+      let guiName = '';
+      let guiTtl = 0;
+      let guiHits = 0;
 
       function esc(value) {
         return String(value).replace(/[&<>"']/g, character => ({
@@ -453,6 +456,9 @@
         $('overrides').textContent = stats.overrides;
         $('failopen').textContent = stats.fail_open;
         $('errors').textContent = stats.errors;
+        guiHits = stats.builtin_hits ?? guiHits;
+        const guiHitCell = $('gui-hits');
+        if (guiHitCell) guiHitCell.textContent = guiHits;
 
         if (stats.rule_hits) {
           current.forEach((rule, index) => {
@@ -472,7 +478,7 @@
       function renderRules(rules) {
         current = rules;
         $('rule-count').textContent = rules.length + ' rules';
-        $('rules').innerHTML = rules.length
+        const ruleRows = rules.length
           ? rules.map((rule, index) =>
             '<tr><td>' + esc(rule.name) +
             '</td><td>' + esc(rule.address) +
@@ -491,8 +497,12 @@
             '" aria-label="Delete ' + esc(rule.name) + '">×</button>' +
             '</td></tr>'
           ).join('')
-          : '<tr><td class="empty" colspan="5">No overrides yet. ' +
-            'Add one above.</td></tr>';
+          : '<tr><td class="empty" colspan="5">No custom rules.</td></tr>';
+        $('rules').innerHTML = ruleRows +
+          '<tr><td>' + esc(guiName) + ' <span class="count">' +
+          '(GUI hostname)</span></td><td>127.0.0.1</td><td>' + guiTtl +
+          's</td><td class="hit" id="gui-hits">' + guiHits +
+          '</td><td></td></tr>';
       }
 
       async function loadRules() {
@@ -520,6 +530,8 @@
           renderStatistics(status);
 
           const settings = status.settings;
+          guiName = settings.gui_name;
+          guiTtl = settings.default_ttl;
           $('settings').innerHTML = [
             ['Default TTL', settings.default_ttl + 's'],
             ['GUI hostname', settings.gui_name],
