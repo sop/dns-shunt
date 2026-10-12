@@ -9,13 +9,9 @@ mod dns;
 mod packet;
 #[cfg(any(target_os = "windows", test))]
 mod rules;
-#[cfg(any(target_os = "windows", test))]
-mod wfp_protocol;
 
 #[cfg(target_os = "windows")]
 mod service;
-#[cfg(target_os = "windows")]
-mod wfp_backend;
 #[cfg(target_os = "windows")]
 mod windivert_backend;
 
@@ -49,7 +45,6 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let config_path = arguments.config_path;
     let enable_capture = arguments.enable_capture;
     let service_mode = arguments.service_mode;
-    let backend = arguments.backend;
 
     if service_mode {
         #[cfg(target_os = "windows")]
@@ -73,18 +68,11 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     #[cfg(target_os = "windows")]
     {
         let rules_path = rules::default_store_path()?;
-        run_capture(config, rules_path, selected_backend(backend), true)?;
+        run_capture(config, rules_path, true)?;
     }
 
     #[cfg(not(target_os = "windows"))]
-    return Err(format!(
-        "{} interception is supported on Windows only",
-        match selected_backend(backend) {
-            BackendChoice::Wfp => "WFP",
-            BackendChoice::WinDivert => "WinDivert",
-        }
-    )
-    .into());
+    return Err("WinDivert interception is supported on Windows only".into());
 
     #[cfg(target_os = "windows")]
     Ok(())
@@ -94,7 +82,6 @@ struct Arguments {
     config_path: Option<PathBuf>,
     enable_capture: bool,
     service_mode: bool,
-    backend: Option<BackendChoice>,
     help: bool,
 }
 
@@ -104,7 +91,6 @@ fn parse_arguments(
     let mut config_path = None;
     let mut enable_capture = false;
     let mut service_mode = false;
-    let mut backend = None;
     let mut help = false;
     let mut args = args.into_iter();
 
@@ -116,10 +102,6 @@ fn parse_arguments(
             }
             "--run" => enable_capture = true,
             "--service" => service_mode = true,
-            "--backend" => {
-                let value = args.next().ok_or("--backend requires wfp or windivert")?;
-                backend = Some(parse_backend(&value)?);
-            }
             "--help" | "-h" => help = true,
             _ => {
                 return Err(format!("unknown argument: {arg}; use --help").into());
@@ -127,14 +109,13 @@ fn parse_arguments(
         }
     }
 
-    if service_mode && (config_path.is_some() || enable_capture || backend.is_some()) {
+    if service_mode && (config_path.is_some() || enable_capture) {
         return Err("--service cannot be combined with other options".into());
     }
     Ok(Arguments {
         config_path,
         enable_capture,
         service_mode,
-        backend,
         help,
     })
 }
@@ -143,14 +124,13 @@ fn parse_arguments(
 fn run_service() -> Result<(), Box<dyn std::error::Error>> {
     let paths = service::service_paths()?;
     let config = config::Config::load(&paths.config)?;
-    run_capture(config, paths.rules, BackendChoice::WinDivert, false)
+    run_capture(config, paths.rules, false)
 }
 
 #[cfg(target_os = "windows")]
 fn run_capture(
     config: config::Config,
     rules_path: PathBuf,
-    choice: BackendChoice,
     console_mode: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let rules = rules::RuleManager::load(rules_path, config.gui_name.clone(), config.ttl)?;
@@ -160,7 +140,7 @@ fn run_capture(
             rules.snapshot().len()
         );
     }
-    let runtime = admin::RuntimeState::new(config.clone(), rules, choice.label());
+    let runtime = admin::RuntimeState::new(config.clone(), rules, "WinDivert");
     if !console_mode {
         service::attach_runtime(&runtime);
         runtime.set_error_callback(std::sync::Arc::new(service::log_error));
@@ -169,10 +149,7 @@ fn run_capture(
     if console_mode {
         println!("admin interface: http://127.0.0.1:{}", config.gui_port);
     }
-    let result = match choice {
-        BackendChoice::Wfp => wfp_backend::run(config, runtime.clone(), console_mode),
-        BackendChoice::WinDivert => windivert_backend::run(config, runtime.clone(), console_mode),
-    };
+    let result = windivert_backend::run(config, runtime.clone(), console_mode);
     runtime.stop();
     let server_result = server.join();
     result?;
@@ -182,69 +159,18 @@ fn run_capture(
 
 fn print_help() {
     println!(concat!(
-        "dns-shunt --config <path> [--run] [--backend windivert|wfp]\n",
+        "dns-shunt --config <path> [--run]\n",
         "dns-shunt --service (Windows Service Control Manager only)\n\n",
         "Validate config by default. --run starts the loopback web admin ",
-        "and elevated capture (WinDivert by default). Rules are stored in ",
+        "and elevated WinDivert capture. Rules are stored in ",
         "the current user's application-data directory. Install its ",
-        "signed runtime assets with install-windivert.ps1.\n",
-        "Use --backend wfp to select the experimental WFP backend; it ",
-        "requires an installed x64 callout driver, elevation, and a ",
-        "test-signing-enabled test machine for locally built drivers. ",
-        "Build the driver with the Windows Driver Kit (WDK)."
+        "signed runtime assets with install-windivert.ps1."
     ));
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum BackendChoice {
-    Wfp,
-    WinDivert,
-}
-
-impl BackendChoice {
-    #[cfg(target_os = "windows")]
-    const fn label(self) -> &'static str {
-        match self {
-            Self::Wfp => "WFP",
-            Self::WinDivert => "WinDivert",
-        }
-    }
-}
-
-fn parse_backend(value: &str) -> Result<BackendChoice, Box<dyn std::error::Error>> {
-    match value {
-        "wfp" => Ok(BackendChoice::Wfp),
-        "windivert" => Ok(BackendChoice::WinDivert),
-        _ => Err(format!("invalid backend '{value}'; expected wfp or windivert").into()),
-    }
-}
-
-fn selected_backend(requested: Option<BackendChoice>) -> BackendChoice {
-    requested.unwrap_or(BackendChoice::WinDivert)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn parses_supported_backends_and_rejects_unknown_values() {
-        assert_eq!(parse_backend("wfp").unwrap(), BackendChoice::Wfp);
-        assert_eq!(
-            parse_backend("windivert").unwrap(),
-            BackendChoice::WinDivert
-        );
-        assert!(parse_backend("other").is_err());
-        assert_eq!(selected_backend(None), BackendChoice::WinDivert);
-        assert_eq!(
-            selected_backend(Some(BackendChoice::Wfp)),
-            BackendChoice::Wfp
-        );
-        assert_eq!(
-            selected_backend(Some(BackendChoice::WinDivert)),
-            BackendChoice::WinDivert
-        );
-    }
 
     #[test]
     fn selects_service_mode_and_rejects_foreground_options() {

@@ -1,10 +1,8 @@
 # dns-shunt
 
-`dns-shunt` is a Windows DNS override prototype with both foreground and Windows service modes. It synthesizes answers only for matching A/IN records managed through a local web interface. All other DNS packets are passed through unchanged to the resolver Windows selected; the application does not select, configure, or proxy to a resolver. It does not change adapter DNS settings. Capture is opt-in: foreground capture requires `--run`, while installing the automatic-start service is the machine-wide opt-in. WinDivert is the default interception backend; the experimental WFP backend remains available only through explicit foreground selection.
+`dns-shunt` is a Windows DNS override prototype with both foreground and Windows service modes. It synthesizes answers only for matching A/IN records managed through a local web interface. All other DNS packets are passed through unchanged to the resolver Windows selected; the application does not select, configure, or proxy to a resolver. It does not change adapter DNS settings. Capture is opt-in: foreground capture requires `--run`, while installing the automatic-start service is the machine-wide opt-in. WinDivert is the packet interception backend.
 
-Both backends inspect only outbound, non-loopback IPv4 UDP DNS packets to port 53. IPv6, TCP/53, inbound DNS, and loopback traffic are outside the interception scope.
-
-The WFP backend is experimental kernel-driver code. It has not been independently validated across Windows versions and is not production-ready. Use it only in a disposable Windows test environment.
+WinDivert inspects only outbound, non-loopback IPv4 UDP DNS packets to port 53. IPv6, TCP/53, inbound DNS, and loopback traffic are outside the interception scope.
 
 ## Requirements
 
@@ -12,11 +10,9 @@ The WFP backend is experimental kernel-driver code. It has not been independentl
 - Windows 10/11 x64 to run packet interception.
 - Administrator privileges to start interception.
 - Elevated PowerShell to install or uninstall the Windows service.
-- The signed WinDivert runtime assets installed by `install-windivert.ps1` for the default backend.
-- For WFP development: Visual Studio or Build Tools with MSBuild and the Windows Driver Kit (WDK).
-- A disposable test VM with the required test-driver signing configuration to load a locally built WFP driver. Secure Boot and system policy may prevent test drivers from loading.
+- The signed WinDivert runtime assets installed by `install-windivert.ps1`.
 
-The scripts in this repository do not enable test signing or modify BCD, Secure Boot, adapter DNS, or persistent WFP policy. Do not weaken boot security on a normal workstation to test this prototype.
+The scripts in this repository do not modify adapter DNS or resolver selection.
 
 ## Build And Validate
 
@@ -30,7 +26,7 @@ cargo clippy --all-targets -- -D warnings
 cargo build --release
 ```
 
-The Windows release executable is `target\release\dns-shunt.exe`. Run it directly to validate a configuration or start the selected backend:
+The Windows release executable is `target\release\dns-shunt.exe`. Run it directly to validate a configuration or start capture:
 
 ```powershell
 .\target\release\dns-shunt.exe --config .\dns-shunt.example.toml
@@ -86,7 +82,7 @@ Foreground user rules are stored as human-readable JSON in `%APPDATA%\dns-shunt\
 
 ## Windows Service
 
-The service runs one machine-wide capture process as `LocalSystem`; it starts at boot without a user session. Installing it from an elevated PowerShell session is the administrator's explicit opt-in. It uses WinDivert and the fixed ProgramData config/rules paths; the experimental WFP backend is not selected in service mode.
+The service runs one machine-wide capture process as `LocalSystem`; it starts at boot without a user session. Installing it from an elevated PowerShell session is the administrator's explicit opt-in. It uses WinDivert and the fixed ProgramData config/rules paths.
 
 Build the release executable and install the service from an elevated PowerShell at the repository root:
 
@@ -115,91 +111,13 @@ Stop-Service DnsShunt
 .\uninstall-service.ps1
 ```
 
-Uninstall stops/deletes the service and removes its installed binaries. It preserves `%ProgramData%\dns-shunt` configuration and rules by default. Confirm ordinary DNS resumes after stopping the service. Rust tests and service lifecycle checks do not establish WFP driver safety.
+Uninstall stops/deletes the service and removes its installed binaries. It preserves `%ProgramData%\dns-shunt` configuration and rules by default. Confirm ordinary DNS resumes after stopping the service.
 
-WinDivert can also be selected explicitly. The experimental WFP backend remains available with `--backend wfp`:
+Run commands from an elevated terminal. `--help` prints the available options and prerequisites.
 
-```powershell
-cargo run -- --config .\dns-shunt.example.toml --run --backend windivert
-cargo run -- --config .\dns-shunt.example.toml --run --backend wfp
-```
+## WinDivert
 
-Run commands from an elevated terminal. The WFP driver must already be installed when selecting that backend. `--help` prints the available options and prerequisites.
-
-## Develop And Test WFP
-
-### Build The Driver
-
-Open an x64 Developer PowerShell with the WDK installed, then build the WDK project from the repository root:
-
-```powershell
-msbuild .\driver\DnsShuntWfp.vcxproj /m /p:Configuration=Debug /p:Platform=x64
-```
-
-The project is configured for WDK test signing. The generated package is expected under `driver\x64\Debug` and includes the INF, SYS, and CAT files required by the install script. The test certificate and test-signing policy must be handled using your approved workflow on a disposable VM; the repository does not change those settings.
-
-### Install And Start
-
-From an elevated PowerShell in the repository root:
-
-```powershell
-.\driver\install-wfp.ps1 -PackageDirectory .\driver\x64\Debug
-```
-
-This stages the driver package, copies the driver to the Windows drivers directory, registers the demand-start kernel service if needed, and starts it. The script refuses to run without administrator privileges and does not modify boot-security settings.
-
-If the service is stopped, the WFP backend starts it for the run and stops it when the application exits. If the install script already started the service, the application leaves that pre-existing service running; the WFP filters themselves are dynamic and are removed when the application exits.
-
-### Run Queries
-
-Run the application elevated with the test configuration:
-
-```powershell
-cargo run -- --config .\dns-shunt.example.toml --run --backend wfp
-```
-
-In another terminal, query the configured override using the DNS resolver selected by Windows:
-
-```powershell
-Resolve-DnsName dev.example.com -Type A -DnsOnly
-```
-
-The answer should contain the configured address (`192.0.2.10` in the example). An unmatched name should reach the resolver selected by Windows unchanged:
-
-```powershell
-Resolve-DnsName example.com -Type A -DnsOnly
-```
-
-To exercise the wildcard rule, query a name below `test.example.net`, such as `host.test.example.net`. Use a DNS query tool that sends ordinary IPv4 UDP DNS to port 53; the current WFP filter does not intercept IPv6, TCP DNS, inbound queries, or loopback traffic.
-
-Press Ctrl+C in the proxy terminal to stop. Confirm ordinary DNS works afterward and that no dynamic WFP filter remains. If the install script started the driver, stop and remove the service with:
-
-```powershell
-.\driver\remove-wfp.ps1
-```
-
-Add `-RemovePackage` to remove the staged driver package as well:
-
-```powershell
-.\driver\remove-wfp.ps1 -RemovePackage
-```
-
-### Failure And Regression Checks
-
-For driver or proxy changes, verify at minimum:
-
-- Configured A overrides and unchanged pass-through for unmatched A/IN, matching AAAA, and non-IN queries.
-- Malformed DNS reinjection and override response injection failure behavior.
-- Ctrl+C, controller process termination, and driver stop restore normal DNS without duplicate replies.
-- Queue saturation fails open and does not leave packets held.
-- Non-DNS UDP, loopback, IPv6, and inbound DNS are not captured.
-- The client-visible response tuple is the reverse of the original query tuple, and dynamic filters disappear on exit.
-
-These packet-level checks require a disposable, correctly configured Windows test VM. The WFP driver has not been built or validated in every supported environment; successful Rust tests do not establish kernel-driver safety.
-
-## WinDivert Backend
-
-WinDivert is the default backend. Install its signed x64 runtime assets with the setup script, then run without an explicit backend selection:
+Install WinDivert's signed x64 runtime assets with the setup script, then run:
 
 ```powershell
 .\install-windivert.ps1
