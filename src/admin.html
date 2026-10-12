@@ -4,16 +4,55 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <link rel="icon" type="image/svg+xml" href="/favicon.svg">
-    <title>dns-shunt / control room</title>
+    <title>DNS Shunt / dashboard</title>
+    <script>
+      const themePreference = window.matchMedia(
+        '(prefers-color-scheme: dark)'
+      );
+      let manualTheme = null;
+      try {
+        const savedTheme = localStorage.getItem('dns-shunt-theme');
+        if (savedTheme === 'light' || savedTheme === 'dark') {
+          manualTheme = savedTheme;
+        }
+      } catch {}
+      document.documentElement.dataset.theme = manualTheme ||
+        (themePreference.matches ? 'dark' : 'light');
+    </script>
     <style>
       :root {
+        color-scheme: light;
+        --bg: #f4f6ef;
+        --glow: #dfe9d1;
+        --panel: #fff;
+        --panel-raised: #f3f6ee;
+        --field: #fff;
+        --line: #d5ddcb;
+        --muted: #596354;
+        --ink: #20291e;
+        --acid: #48651c;
+        --accent-ink: #fff;
+        --live-line: #82955d;
+        --delete-line: #a36b58;
+        --delete-ink: #9a402b;
+        --orange: #9a4d13;
+      }
+
+      :root[data-theme="dark"] {
         color-scheme: dark;
         --bg: #101514;
+        --glow: #324338;
         --panel: #191f1d;
+        --panel-raised: #1c2420;
+        --field: #0f1412;
         --line: #303a36;
         --muted: #a5b3aa;
         --ink: #edf4ec;
         --acid: #c7f36b;
+        --accent-ink: #15200f;
+        --live-line: #607742;
+        --delete-line: #714d41;
+        --delete-ink: #ff9b82;
         --orange: #e69b63;
       }
 
@@ -24,7 +63,7 @@
       body {
         margin: 0;
         background:
-          radial-gradient(ellipse at 85% -10%, #324338 0, transparent 38%),
+          radial-gradient(ellipse at 85% -10%, var(--glow) 0, transparent 38%),
           var(--bg);
         color: var(--ink);
         font: 15px/1.5 ui-monospace, SFMono-Regular, Consolas, monospace;
@@ -40,8 +79,15 @@
         display: flex;
         justify-content: space-between;
         align-items: center;
+        gap: 12px;
         border-bottom: 1px solid var(--line);
         padding-bottom: 22px;
+      }
+
+      .top-actions {
+        display: flex;
+        align-items: center;
+        gap: 10px;
       }
 
       .brand {
@@ -68,10 +114,46 @@
 
       .live {
         padding: 7px 11px;
-        border: 1px solid #607742;
+        border: 1px solid var(--live-line);
         border-radius: 3px;
         color: var(--acid);
         font-size: 12px;
+      }
+
+      button.theme-toggle {
+        display: grid;
+        width: 38px;
+        height: 38px;
+        place-items: center;
+        padding: 0;
+        border-color: transparent;
+        background: transparent;
+        color: var(--ink);
+      }
+
+      button.theme-toggle:hover {
+        border-color: transparent;
+        color: var(--acid);
+      }
+
+      button.theme-toggle:focus-visible {
+        outline: 2px solid var(--acid);
+        outline-offset: 2px;
+      }
+
+      .theme-toggle svg {
+        width: 18px;
+        height: 18px;
+        fill: none;
+        stroke: currentColor;
+        stroke-linecap: round;
+        stroke-linejoin: round;
+        stroke-width: 1.7;
+      }
+
+      [data-theme="light"] .theme-icon-dark,
+      [data-theme="dark"] .theme-icon-light {
+        display: none;
       }
 
       .grid {
@@ -85,7 +167,7 @@
       .section {
         border: 1px solid var(--line);
         border-radius: 5px;
-        background: linear-gradient(145deg, #1c2420, #171c1a);
+        background: linear-gradient(145deg, var(--panel-raised), var(--panel));
       }
 
       .card {
@@ -148,7 +230,7 @@
         padding: 10px;
         border: 1px solid var(--line);
         border-radius: 3px;
-        background: #0f1412;
+        background: var(--field);
         color: var(--ink);
         font: inherit;
       }
@@ -160,7 +242,7 @@
       button {
         border-color: var(--acid);
         background: var(--acid);
-        color: #15200f;
+        color: var(--accent-ink);
         font-weight: 700;
         cursor: pointer;
       }
@@ -178,9 +260,9 @@
 
       button.delete {
         padding: 5px 9px;
-        border-color: #714d41;
+        border-color: var(--delete-line);
         background: transparent;
-        color: #ff9b82;
+        color: var(--delete-ink);
       }
 
       button.move {
@@ -286,7 +368,22 @@
         }
       }
 
+      @media (max-width: 500px) {
+        .top {
+          align-items: flex-start;
+          flex-wrap: wrap;
+        }
+
+        .top-actions {
+          margin-left: auto;
+        }
+      }
+
       @media (max-width: 420px) {
+        .brand {
+          font-size: 12px;
+        }
+
         form {
           grid-template-columns: 1fr;
         }
@@ -306,8 +403,25 @@
   <body>
     <main>
       <div class="top">
-        <div class="brand"><b>dns-shunt</b> / local control room</div>
-        <div class="live" id="service">CONNECTING</div>
+        <div class="brand"><b>DNS Shunt</b> / dashboard</div>
+        <div class="top-actions">
+          <button class="theme-toggle" id="theme-toggle" type="button"
+            aria-label="Switch to dark mode" title="Switch to dark mode">
+            <svg class="theme-icon-dark" viewBox="0 0 24 24"
+              aria-hidden="true">
+              <circle cx="12" cy="12" r="4"></circle>
+              <path d="M12 2v2m0 16v2M4.93 4.93l1.42 1.42m11.3 11.3
+                1.42 1.42M2 12h2m16 0h2M4.93 19.07l1.42-1.42
+                m11.3-11.3 1.42-1.42"></path>
+            </svg>
+            <svg class="theme-icon-light" viewBox="0 0 24 24"
+              aria-hidden="true">
+              <path d="M20.9 13A9 9 0 0 1 11 3.1 9 9 0 1 0 20.9 13Z">
+              </path>
+            </svg>
+          </button>
+          <div class="live" id="service">CONNECTING</div>
+        </div>
       </div>
 
       <h1>Override your DNS queries</h1>
@@ -384,14 +498,39 @@
 
     <script>
       const $ = id => document.getElementById(id);
+      const themeToggle = $('theme-toggle');
       let current = [];
-      let backend = '';
       let uptimeBaseline = 0;
       let uptimeStartedAt = 0;
       let dashboardConnected = false;
       let guiName = '';
       let guiTtl = 0;
       let guiHits = 0;
+
+      function applyTheme(theme) {
+        document.documentElement.dataset.theme = theme;
+        const target = theme === 'dark' ? 'light' : 'dark';
+        themeToggle.setAttribute('aria-label', 'Switch to ' + target + ' mode');
+        themeToggle.title = 'Switch to ' + target + ' mode';
+      }
+
+      applyTheme(document.documentElement.dataset.theme);
+
+      themeToggle.addEventListener('click', () => {
+        manualTheme = document.documentElement.dataset.theme === 'dark'
+          ? 'light'
+          : 'dark';
+        applyTheme(manualTheme);
+        try {
+          localStorage.setItem('dns-shunt-theme', manualTheme);
+        } catch {}
+      });
+
+      themePreference.addEventListener('change', event => {
+        if (manualTheme === null) {
+          applyTheme(event.matches ? 'dark' : 'light');
+        }
+      });
 
       function esc(value) {
         return String(value).replace(/[&<>"']/g, character => ({
@@ -520,10 +659,8 @@
             api('/api/rules'),
           ]);
 
-          backend = status.backend;
           dashboardConnected = true;
-          $('service').textContent =
-            status.service.toUpperCase() + ' · ' + backend;
+          $('service').textContent = status.service.toUpperCase();
           uptimeBaseline = status.uptime_seconds;
           uptimeStartedAt = performance.now();
           renderUptime();
@@ -644,13 +781,11 @@
             const status = await api('/api/status');
             if (events.readyState !== EventSource.OPEN) return;
 
-            backend = status.backend;
             uptimeBaseline = status.uptime_seconds;
             uptimeStartedAt = performance.now();
             dashboardConnected = true;
             renderUptime();
-            $('service').textContent =
-              backend ? 'RUNNING · ' + backend : 'RUNNING';
+            $('service').textContent = 'RUNNING';
           } catch (error) {
             dashboardConnected = false;
             renderUptime();
@@ -660,8 +795,7 @@
         events.onerror = () => {
           dashboardConnected = false;
           renderUptime();
-          $('service').textContent =
-            backend ? 'RECONNECTING · ' + backend : 'RECONNECTING';
+          $('service').textContent = 'RECONNECTING';
         };
       }
 
