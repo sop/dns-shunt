@@ -14,7 +14,7 @@ $assetUrl = (
     $assetName
 )
 $expectedArchiveSize = 405137
-$projectRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
+$projectRoot = Split-Path -Parent $PSScriptRoot
 $targetRoot = Join-Path $projectRoot "target"
 $assetRoot = Join-Path $targetRoot "windivert"
 $archivePath = Join-Path $assetRoot $assetName

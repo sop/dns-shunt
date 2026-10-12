@@ -9,7 +9,8 @@ WinDivert inspects only outbound, non-loopback IPv4 UDP DNS packets to port 53. 
 - Rust stable with the MSVC toolchain for native Windows builds.
 - Windows 10/11 x64 to run packet interception.
 - Administrator privileges to start interception.
-- The signed WinDivert runtime assets installed by `install-windivert.ps1` for
+- The signed WinDivert runtime assets installed by
+  `scripts/install-windivert.ps1` for
   manual foreground capture.
 
 The scripts in this repository do not modify adapter DNS or resolver selection.
@@ -38,7 +39,7 @@ directory:
 
 The script builds the `x86_64-pc-windows-msvc` release, downloads or reuses the
 pinned WinDivert 2.2.2 x64 archive, checks its SHA-256 and driver signature,
-then compiles `dist\dns-shunt-setup.exe`. Staged files and the archive cache
+then compiles `dist\DNS-Shunt-Setup.exe`. Staged files and the archive cache
 are isolated under `dist\`; the workflow does not modify
 `target\debug`/`target\release` runtime assets or stop an active WinDivert
 driver.
@@ -89,7 +90,7 @@ cargo run -- --config .\dns-shunt.example.toml
 Install the WinDivert runtime assets once, then run the default backend:
 
 ```powershell
-.\install-windivert.ps1
+.\scripts\install-windivert.ps1
 cargo run -- --config .\dns-shunt.example.toml --run
 ```
 
@@ -123,7 +124,7 @@ Each command requires an elevated administrator. Installation creates
 `config.toml` only when absent, validates it, registers the `Dns-Shunt` Event
 Log source, and creates or updates and starts the automatic service. The
 installer package stages the executable, signed WinDivert runtime, and example
-configuration under `%ProgramFiles%\dns-shunt`. Check status and startup
+configuration under `%ProgramFiles%\DNS Shunt`. Check status and startup
 diagnostics with:
 
 ```powershell
@@ -155,7 +156,7 @@ Run commands from an elevated terminal. `--help` prints the available options an
 Install WinDivert's signed x64 runtime assets with the setup script, then run:
 
 ```powershell
-.\install-windivert.ps1
+.\scripts\install-windivert.ps1
 cargo run -- --config .\dns-shunt.example.toml --run
 ```
 

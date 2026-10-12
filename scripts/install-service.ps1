@@ -1,11 +1,11 @@
 param(
-    [string]$InstallDirectory = (Join-Path $env:ProgramFiles "dns-shunt")
+    [string]$InstallDirectory = (Join-Path $env:ProgramFiles "DNS Shunt")
 )
 
 $ErrorActionPreference = "Stop"
 $serviceName = "DnsShunt"
 $eventSource = "Dns-Shunt"
-$projectRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
+$projectRoot = Split-Path -Parent $PSScriptRoot
 $releaseDirectory = Join-Path $projectRoot "target\release"
 $programDataDirectory = Join-Path $env:ProgramData "dns-shunt"
 $exampleConfig = Join-Path $projectRoot "dns-shunt.example.toml"
@@ -18,7 +18,7 @@ if (-not $principal.IsInRole(
     throw "Run this installer from an elevated PowerShell session."
 }
 
-$windivertSetup = Join-Path $projectRoot "install-windivert.ps1"
+$windivertSetup = Join-Path $PSScriptRoot "install-windivert.ps1"
 & $windivertSetup
 
 $releaseExecutable = Join-Path $releaseDirectory "dns-shunt.exe"
@@ -64,7 +64,7 @@ $service = Get-Service -Name $serviceName -ErrorAction SilentlyContinue
 $binaryPath = "`"$installedExecutable`" --service"
 if ($null -eq $service) {
     New-Service -Name $serviceName -BinaryPathName $binaryPath `
-        -StartupType Automatic -DisplayName "dns-shunt DNS override service" |
+        -StartupType Automatic -DisplayName "DNS Shunt DNS override service" |
         Out-Null
 }
 else {

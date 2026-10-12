@@ -116,7 +116,7 @@ if ($archiveHash -ne $archiveSha256) {
     Stop-WithError "WinDivert archive SHA-256 mismatch: $archiveHash"
 }
 
-$installerPath = Join-Path $distDirectory "dns-shunt-setup.exe"
+$installerPath = Join-Path $distDirectory "DNS-Shunt-Setup.exe"
 if (Test-Path -LiteralPath $installerPath) {
     Remove-Item -LiteralPath $installerPath -Force
 }

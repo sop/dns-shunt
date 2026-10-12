@@ -1,5 +1,5 @@
 param(
-    [string]$InstallDirectory = (Join-Path $env:ProgramFiles "dns-shunt")
+    [string]$InstallDirectory = (Join-Path $env:ProgramFiles "DNS Shunt")
 )
 
 $ErrorActionPreference = "Stop"

@@ -403,6 +403,14 @@ fn handle_connection(mut stream: TcpStream, runtime: &Arc<RuntimeState>) -> Resu
         serve_events(&mut stream, runtime);
         return Ok(());
     }
+    if matches!(request.method.as_str(), "GET" | "HEAD") && request.path == "/favicon.svg" {
+        let body = if request.method == "GET" {
+            FAVICON.as_bytes()
+        } else {
+            b""
+        };
+        return send_response(&mut stream, 200, body, "image/svg+xml");
+    }
     let (status, content_type, body) = match route(&request, runtime) {
         Ok((status, value)) => (
             status,
@@ -758,6 +766,7 @@ fn send_response(
 }
 
 const DASHBOARD: &str = include_str!("admin.html");
+const FAVICON: &str = include_str!("../assets/dns-shunt.svg");
 
 #[cfg(test)]
 mod tests {
@@ -871,6 +880,34 @@ mod tests {
             &format!("GET / HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n\r\n"),
         );
         assert!(dashboard.starts_with(b"HTTP/1.1 200 OK\r\n"));
+        assert!(
+            dashboard
+                .windows(b"href=\"/favicon.svg\"".len())
+                .any(|window| window == b"href=\"/favicon.svg\"")
+        );
+
+        let favicon = connection_response(
+            &state,
+            &format!("GET /favicon.svg HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n\r\n"),
+        );
+        assert!(favicon.starts_with(b"HTTP/1.1 200 OK\r\n"));
+        assert!(
+            favicon
+                .windows(b"Content-Type: image/svg+xml".len())
+                .any(|window| window == b"Content-Type: image/svg+xml")
+        );
+        assert!(
+            favicon
+                .windows(b"<svg ".len())
+                .any(|window| window == b"<svg ")
+        );
+
+        let favicon_head = connection_response(
+            &state,
+            &format!("HEAD /favicon.svg HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n\r\n"),
+        );
+        assert!(favicon_head.starts_with(b"HTTP/1.1 200 OK\r\n"));
+        assert!(favicon_head.ends_with(b"\r\n\r\n"));
 
         let status = connection_response(
             &state,
