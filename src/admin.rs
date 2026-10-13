@@ -408,13 +408,13 @@ fn handle_connection(mut stream: TcpStream, runtime: &Arc<RuntimeState>) -> Resu
         serve_events(&mut stream, runtime);
         return Ok(());
     }
-    if matches!(request.method.as_str(), "GET" | "HEAD") && request.path == "/favicon.svg" {
+    if matches!(request.method.as_str(), "GET" | "HEAD") && request.path == "/favicon.png" {
         let body = if request.method == "GET" {
-            FAVICON.as_bytes()
+            ICON_PNG
         } else {
             b""
         };
-        return send_response(&mut stream, 200, body, "image/svg+xml");
+        return send_response(&mut stream, 200, body, "image/png");
     }
     let (status, content_type, body) = match route(&request, runtime) {
         Ok((status, value)) => (
@@ -771,7 +771,7 @@ fn send_response(
 }
 
 const DASHBOARD: &str = include_str!("admin.html");
-const FAVICON: &str = include_str!("../assets/dns-shunt.svg");
+const ICON_PNG: &[u8] = include_bytes!("../assets/dns-shunt.png");
 
 #[cfg(test)]
 mod tests {
@@ -887,29 +887,34 @@ mod tests {
         assert!(dashboard.starts_with(b"HTTP/1.1 200 OK\r\n"));
         assert!(
             dashboard
-                .windows(b"href=\"/favicon.svg\"".len())
-                .any(|window| window == b"href=\"/favicon.svg\"")
+                .windows(b"href=\"/favicon.png\"".len())
+                .any(|window| window == b"href=\"/favicon.png\"")
+        );
+        assert!(
+            dashboard
+                .windows(b"src=\"/favicon.png\"".len())
+                .any(|window| window == b"src=\"/favicon.png\"")
         );
 
         let favicon = connection_response(
             &state,
-            &format!("GET /favicon.svg HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n\r\n"),
+            &format!("GET /favicon.png HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n\r\n"),
         );
         assert!(favicon.starts_with(b"HTTP/1.1 200 OK\r\n"));
         assert!(
             favicon
-                .windows(b"Content-Type: image/svg+xml".len())
-                .any(|window| window == b"Content-Type: image/svg+xml")
+                .windows(b"Content-Type: image/png".len())
+                .any(|window| window == b"Content-Type: image/png")
         );
         assert!(
             favicon
-                .windows(b"<svg ".len())
-                .any(|window| window == b"<svg ")
+                .windows(b"\x89PNG\r\n\x1a\n".len())
+                .any(|window| window == b"\x89PNG\r\n\x1a\n")
         );
 
         let favicon_head = connection_response(
             &state,
-            &format!("HEAD /favicon.svg HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n\r\n"),
+            &format!("HEAD /favicon.png HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n\r\n"),
         );
         assert!(favicon_head.starts_with(b"HTTP/1.1 200 OK\r\n"));
         assert!(favicon_head.ends_with(b"\r\n\r\n"));
