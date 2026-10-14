@@ -587,12 +587,6 @@ struct IndexedInput {
     ttl: Option<u32>,
 }
 
-#[derive(Deserialize)]
-struct ReorderInput {
-    from: usize,
-    to: usize,
-}
-
 fn route(request: &HttpRequest, runtime: &RuntimeState) -> Result<(u16, Value), (u16, String)> {
     match (request.method.as_str(), request.path.as_str()) {
         ("GET", "/api/status") => Ok((200, runtime.status())),
@@ -609,23 +603,6 @@ fn route(request: &HttpRequest, runtime: &RuntimeState) -> Result<(u16, Value), 
                 .map_err(store_error)?;
             runtime.notify_rules_changed();
             Ok((201, json!({"rules": result.len()})))
-        }
-        ("POST", "/api/rules/reorder") => {
-            let input: ReorderInput = parse_json(&request.body)?;
-            let result = runtime
-                .rules
-                .transact(|current| {
-                    if input.from >= current.len() || input.to >= current.len() {
-                        return Err("rule index is out of range".into());
-                    }
-                    let mut next = current.iter().map(config::rule_input).collect::<Vec<_>>();
-                    let rule = next.remove(input.from);
-                    next.insert(input.to, rule);
-                    Ok(next)
-                })
-                .map_err(store_error)?;
-            runtime.notify_rules_changed();
-            Ok((200, json!({"rules": result.len()})))
         }
         ("PUT", "/api/rules") => {
             let input: IndexedInput = parse_json(&request.body)?;
@@ -1230,32 +1207,35 @@ mod tests {
     }
 
     #[test]
-    fn reorders_rules_and_persists_the_new_order() {
+    fn rules_are_sorted_for_api_indices_and_persistence() {
         let state = runtime();
         for (name, address) in [
-            ("first.example", "192.0.2.1"),
-            ("second.example", "192.0.2.2"),
+            ("z.example.com", "192.0.2.1"),
+            ("example.net", "192.0.2.2"),
+            ("example.com", "192.0.2.3"),
         ] {
             let body = format!(r#"{{"name":"{name}","address":"{address}"}}"#);
             assert!(route(&request("POST", "/api/rules", &body), &state).is_ok());
         }
 
+        assert_eq!(state.rules_json()[0]["name"], "example.com");
+        assert_eq!(state.rules_json()[1]["name"], "z.example.com");
+        assert_eq!(state.rules_json()[2]["name"], "example.net");
+
         assert!(
             route(
-                &request("POST", "/api/rules/reorder", r#"{"from":0,"to":1}"#),
+                &request(
+                    "PUT",
+                    "/api/rules",
+                    r#"{"index":1,"name":"a.example.com","address":"192.0.2.4"}"#,
+                ),
                 &state,
             )
             .is_ok()
         );
-        assert_eq!(state.rules_json()[0]["name"], "second.example");
-        assert_eq!(state.rules_json()[1]["name"], "first.example");
-        assert!(
-            route(
-                &request("POST", "/api/rules/reorder", r#"{"from":2,"to":0}"#),
-                &state,
-            )
-            .is_err()
-        );
+        assert_eq!(state.rules_json()[0]["name"], "example.com");
+        assert_eq!(state.rules_json()[1]["name"], "a.example.com");
+        assert_eq!(state.rules_json()[2]["name"], "example.net");
 
         let path = state.rules.store_path().to_path_buf();
         let persisted = RuleManager::load(
@@ -1264,8 +1244,9 @@ mod tests {
             state.config.ttl,
         )
         .unwrap();
-        assert_eq!(persisted.snapshot()[0].name, "second.example");
-        assert_eq!(persisted.snapshot()[1].name, "first.example");
+        assert_eq!(persisted.snapshot()[0].name, "example.com");
+        assert_eq!(persisted.snapshot()[1].name, "a.example.com");
+        assert_eq!(persisted.snapshot()[2].name, "example.net");
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 

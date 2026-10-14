@@ -112,7 +112,7 @@ With `--run`, the unauthenticated dashboard is available at
 `http://dns-shunt.local:53080` by default (or the configured `gui_name` and
 `gui_port`). The listener binds only to IPv4 loopback and retains Host
 validation and same-origin checks for rule changes. Any local user or process
-can view dashboard data and add, edit, reorder, or delete rules; do not expose
+can view dashboard data and add, edit, or delete rules; do not expose
 the listener beyond the local machine. The configured `gui_name` resolves to
 loopback through intercepted DNS as well; use
 `http://127.0.0.1:53080` if DNS-over-HTTPS or another DNS path bypasses

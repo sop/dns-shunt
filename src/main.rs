@@ -183,7 +183,10 @@ fn run_capture(
     }
     let server = admin::AdminServer::bind(&runtime)?;
     if console_mode {
-        println!("admin interface: http://127.0.0.1:{}", config.gui_port);
+        println!(
+            "admin interface: http://{}:{}",
+            config.gui_name, config.gui_port
+        );
     }
     let result = windivert_backend::run(config, runtime.clone(), console_mode);
     runtime.stop();

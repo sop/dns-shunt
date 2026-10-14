@@ -180,7 +180,16 @@ pub fn validate_rules(
             ttl,
         });
     }
+    rules.sort_by(compare_rules);
     Ok(rules)
+}
+
+fn compare_rules(left: &Rule, right: &Rule) -> std::cmp::Ordering {
+    left.name
+        .split('.')
+        .rev()
+        .cmp(right.name.split('.').rev())
+        .then_with(|| left.wildcard.cmp(&right.wildcard))
 }
 
 #[allow(dead_code)]
@@ -402,6 +411,59 @@ mod tests {
             },
         ];
         assert!(validate_rules(overlapping, "dns-shunt.local", 60).is_err());
+    }
+
+    #[test]
+    fn sorts_rules_by_reversed_labels_parent_then_exact_rule() {
+        let entries = vec![
+            RuleInput {
+                name: "*.example.com".into(),
+                address: "192.0.2.1".into(),
+                ttl: None,
+            },
+            RuleInput {
+                name: "z.example.com".into(),
+                address: "192.0.2.2".into(),
+                ttl: None,
+            },
+            RuleInput {
+                name: "example.net".into(),
+                address: "192.0.2.3".into(),
+                ttl: None,
+            },
+            RuleInput {
+                name: "example.com".into(),
+                address: "192.0.2.4".into(),
+                ttl: None,
+            },
+            RuleInput {
+                name: "a.example.com".into(),
+                address: "192.0.2.5".into(),
+                ttl: None,
+            },
+        ];
+
+        let rules = validate_rules(entries, "dns-shunt.local", 60).unwrap();
+        let names = rules
+            .iter()
+            .map(|rule| {
+                if rule.wildcard {
+                    format!("*.{}", rule.name)
+                } else {
+                    rule.name.clone()
+                }
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            names,
+            [
+                "example.com",
+                "*.example.com",
+                "a.example.com",
+                "z.example.com",
+                "example.net",
+            ]
+        );
     }
 
     #[test]

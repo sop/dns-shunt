@@ -274,18 +274,6 @@
         color: var(--delete-ink);
       }
 
-      button.move {
-        padding: 5px 8px;
-        border-color: var(--line);
-        background: transparent;
-        color: var(--muted);
-      }
-
-      button.move:disabled {
-        cursor: default;
-        opacity: .35;
-      }
-
       td.actions {
         white-space: nowrap;
       }
@@ -488,7 +476,7 @@
                   <th>IPv4 answer</th>
                   <th>TTL</th>
                   <th style="text-align: right">Hits</th>
-                  <th>Order / actions</th>
+                  <th>Actions</th>
                 </tr>
               </thead>
               <tbody id="rules"></tbody>
@@ -635,15 +623,8 @@
             '</td><td>' + esc(rule.address) +
             '</td><td>' + rule.ttl + 's</td>' +
             '<td class="hit">' + rule.hits + '</td>' +
-            '<td class="actions"><button class="move" data-index="' +
-            index + '" data-direction="up" aria-label="Move ' +
-            esc(rule.name) + ' up" ' +
-            (index === 0 ? 'disabled' : '') + '>↑</button> ' +
-            '<button class="move" data-index="' + index +
-            '" data-direction="down" aria-label="Move ' +
-            esc(rule.name) + ' down" ' +
-            (index === rules.length - 1 ? 'disabled' : '') + '>↓</button> ' +
-            '<button class="edit" data-index="' + index + '">Edit</button> ' +
+            '<td class="actions"><button class="edit" data-index="' + index +
+            '">Edit</button> ' +
             '<button class="delete" data-index="' + index +
             '" aria-label="Delete ' + esc(rule.name) + '">×</button>' +
             '</td></tr>'
@@ -719,21 +700,6 @@
           try {
             await api('/api/rules/' + index, { method: 'DELETE' });
             $('notice').textContent = 'Rule removed';
-            await loadRules();
-          } catch (error) {
-            showError(error);
-          }
-        } else if (button.classList.contains('move')) {
-          const direction = button.dataset.direction;
-          try {
-            await api('/api/rules/reorder', {
-              method: 'POST',
-              body: JSON.stringify({
-                from: index,
-                to: index + (direction === 'up' ? -1 : 1),
-              }),
-            });
-            $('notice').textContent = 'Rule moved ' + direction;
             await loadRules();
           } catch (error) {
             showError(error);

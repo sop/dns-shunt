@@ -43,7 +43,28 @@ impl RuleManager {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
             Err(error) => return Err(error.into()),
         };
+        let input_order = inputs
+            .iter()
+            .map(|input| {
+                let wildcard = input.name.starts_with("*.");
+                let name = input
+                    .name
+                    .strip_prefix("*.")
+                    .unwrap_or(&input.name)
+                    .trim_end_matches('.')
+                    .to_ascii_lowercase();
+                (name, wildcard)
+            })
+            .collect::<Vec<_>>();
         let rules = config::validate_rules(inputs, &reserved_name, default_ttl)?;
+        let sorted_order = rules
+            .iter()
+            .map(|rule| (rule.name.clone(), rule.wildcard))
+            .collect::<Vec<_>>();
+        if input_order != sorted_order {
+            let sorted_inputs = rules.iter().map(config::rule_input).collect::<Vec<_>>();
+            let _ = persist(&path, &sorted_inputs);
+        }
         Ok(Self {
             path,
             reserved_name,
@@ -83,7 +104,8 @@ impl RuleManager {
         let validated =
             config::validate_rules(proposed.clone(), &self.reserved_name, self.default_ttl)?;
         let compiled = Arc::new(CompiledRules::new(validated.clone()));
-        persist(&self.path, &proposed)?;
+        let sorted_inputs = validated.iter().map(config::rule_input).collect::<Vec<_>>();
+        persist(&self.path, &sorted_inputs)?;
         *self
             .snapshot
             .write()
@@ -234,6 +256,55 @@ mod tests {
         let reopened = RuleManager::load(path.clone(), "dns-shunt.local".into(), 60).unwrap();
         assert_eq!(reopened.snapshot()[0].name, "two.example");
         assert!(!fs::read_to_string(&path).unwrap().contains("query"));
+        let _ = fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn normalizes_existing_store_order_and_sorts_mutations() {
+        let path = test_path();
+        let unsorted = vec![
+            input("z.example.com", "192.0.2.1"),
+            input("example.net", "192.0.2.2"),
+            input("example.com", "192.0.2.3"),
+        ];
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, serde_json::to_vec(&unsorted).unwrap()).unwrap();
+
+        let manager = RuleManager::load(path.clone(), "dns-shunt.local".into(), 60).unwrap();
+        assert_eq!(
+            manager
+                .snapshot()
+                .iter()
+                .map(|rule| rule.name.as_str())
+                .collect::<Vec<_>>(),
+            ["example.com", "z.example.com", "example.net"]
+        );
+        let stored: Vec<RuleInput> = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        assert_eq!(
+            stored
+                .iter()
+                .map(|rule| rule.name.as_str())
+                .collect::<Vec<_>>(),
+            ["example.com", "z.example.com", "example.net"]
+        );
+
+        manager
+            .transact(|_| {
+                Ok(vec![
+                    input("*.example.com", "192.0.2.4"),
+                    input("example.net", "192.0.2.5"),
+                    input("example.com", "192.0.2.6"),
+                ])
+            })
+            .unwrap();
+        let stored: Vec<RuleInput> = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        assert_eq!(
+            stored
+                .iter()
+                .map(|rule| rule.name.as_str())
+                .collect::<Vec<_>>(),
+            ["example.com", "*.example.com", "example.net"]
+        );
         let _ = fs::remove_dir_all(path.parent().unwrap());
     }
 
