@@ -260,6 +260,43 @@ mod tests {
     }
 
     #[test]
+    fn persists_reloads_and_updates_overlapping_wildcard_rules() {
+        let path = test_path();
+        let manager = RuleManager::load(path.clone(), "dns-shunt.local".into(), 60).unwrap();
+        manager
+            .transact(|_| {
+                Ok(vec![
+                    input("*.example.com", "192.0.2.1"),
+                    input("*.sub.example.com", "192.0.2.2"),
+                ])
+            })
+            .unwrap();
+
+        let reopened = RuleManager::load(path.clone(), "dns-shunt.local".into(), 60).unwrap();
+        let snapshot = reopened.packet_snapshot();
+        assert_eq!(
+            snapshot
+                .lookup_normalized("www.sub.example.com")
+                .unwrap()
+                .address,
+            "192.0.2.2".parse::<std::net::Ipv4Addr>().unwrap()
+        );
+        assert_eq!(
+            snapshot
+                .lookup_normalized("www.example.com")
+                .unwrap()
+                .address,
+            "192.0.2.1".parse::<std::net::Ipv4Addr>().unwrap()
+        );
+
+        let stored: Vec<RuleInput> = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        assert_eq!(stored.len(), 2);
+        assert!(stored.iter().any(|rule| rule.name == "*.example.com"));
+        assert!(stored.iter().any(|rule| rule.name == "*.sub.example.com"));
+        let _ = fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
     fn normalizes_existing_store_order_and_sorts_mutations() {
         let path = test_path();
         let unsorted = vec![

@@ -118,7 +118,21 @@ loopback through intercepted DNS as well; use
 `http://127.0.0.1:53080` if DNS-over-HTTPS or another DNS path bypasses
 interception. A port conflict prevents capture from starting.
 
-Foreground user rules are stored as human-readable JSON in `%APPDATA%\dns-shunt\rules.json` on Windows. The service instead uses the shared `%ProgramData%\dns-shunt\rules.json` and `%ProgramData%\dns-shunt\config.toml` files. The browser can add, edit, and delete rules immediately; exact names precede wildcards, and wildcards match subdomains but not their apex. Only matching A/IN queries receive synthesized responses. Nonmatching names, AAAA queries, other classes, malformed DNS, and unsupported messages are immediately reinjected unchanged; unmatched traffic is neither correlated nor counted. The JSON store is validated in full before it is persisted and published. Corrupt or unreadable stores fail startup rather than silently disabling overrides. Aggregate override, fail-open, and error counters, uptime, and per-rule hit counts cover only the current run and are not written to disk; individual query names are never retained. TTL, GUI name, and HTTP port remain read-only TOML settings.
+Foreground user rules are stored as human-readable JSON in
+`%APPDATA%\dns-shunt\rules.json` on Windows. The service instead uses the
+shared `%ProgramData%\dns-shunt\rules.json` and
+`%ProgramData%\dns-shunt\config.toml` files. The browser can add, edit, and
+delete rules immediately. Exact names win; otherwise, the most-specific
+matching wildcard wins. Wildcards match subdomains but not their apex. Only
+matching A/IN queries receive synthesized responses. Nonmatching names, AAAA
+queries, other classes, malformed DNS, and unsupported messages are immediately
+reinjected unchanged; unmatched traffic is neither correlated nor counted. The
+JSON store is validated in full before it is persisted and published. Corrupt
+or unreadable stores fail startup rather than silently disabling overrides.
+Aggregate override, fail-open, and error counters, uptime, and per-rule hit
+counts cover only the current run and are not written to disk; individual query
+names are never retained. TTL, GUI name, and HTTP port remain read-only TOML
+settings.
 
 ## Windows Service
 

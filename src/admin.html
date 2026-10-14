@@ -267,8 +267,12 @@
         gap: 8px;
       }
 
+      button.edit,
       button.delete {
         padding: 5px 9px;
+      }
+
+      button.delete {
         border-color: var(--delete-line);
         background: transparent;
         color: var(--delete-ink);
@@ -483,8 +487,8 @@
             </table>
           </div>
 
-          <p class="foot">Exact names win. Wildcards match subdomains, not
-            the apex.</p>
+          <p class="foot">Exact names win, then the most-specific matching
+            wildcard. Wildcards match subdomains, not the apex.</p>
         </section>
 
         <aside class="section">

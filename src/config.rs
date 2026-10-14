@@ -160,15 +160,6 @@ pub fn validate_rules(
         if !seen.insert(key) {
             return Err(ConfigError::Conflict(input.name));
         }
-        if wildcard
-            && rules.iter().any(|rule: &Rule| {
-                rule.wildcard
-                    && (name.ends_with(&format!(".{}", rule.name))
-                        || rule.name.ends_with(&format!(".{name}")))
-            })
-        {
-            return Err(ConfigError::Conflict(input.name));
-        }
         let address = Ipv4Addr::from_str(&input.address)
             .map_err(|_| ConfigError::RuleAddress(input.name.clone()))?;
         let ttl = input.ttl.unwrap_or(default_ttl);
@@ -202,10 +193,11 @@ pub fn lookup_rule<'a>(rules: &'a [Rule], query_name: &str) -> Option<&'a Rule> 
             rules
                 .iter()
                 .filter(|rule| rule.wildcard && name.len() > rule.name.len())
-                .find(|rule| {
+                .filter(|rule| {
                     name.ends_with(&rule.name)
                         && name.as_bytes().get(name.len() - rule.name.len() - 1) == Some(&b'.')
                 })
+                .max_by_key(|rule| rule.name.len())
         })
 }
 
@@ -397,20 +389,86 @@ mod tests {
         }
         assert!(Config::parse(&format!("{BASE}\ngui_name=\"*.bad.example\"\n")).is_err());
         assert!(Config::parse(&format!("{BASE}\ngui_port=0\n")).is_err());
+    }
 
-        let overlapping = vec![
-            RuleInput {
-                name: "*.example.net".into(),
-                address: "192.0.2.1".into(),
-                ttl: None,
-            },
-            RuleInput {
-                name: "*.sub.example.net".into(),
-                address: "192.0.2.2".into(),
-                ttl: None,
-            },
-        ];
-        assert!(validate_rules(overlapping, "dns-shunt.local", 60).is_err());
+    #[test]
+    fn overlapping_wildcards_match_by_specificity_in_any_input_order() {
+        let parent = RuleInput {
+            name: "*.example.com".into(),
+            address: "192.0.2.1".into(),
+            ttl: None,
+        };
+        let nested = RuleInput {
+            name: "*.sub.example.com".into(),
+            address: "192.0.2.2".into(),
+            ttl: None,
+        };
+        let exact = RuleInput {
+            name: "api.sub.example.com".into(),
+            address: "192.0.2.3".into(),
+            ttl: None,
+        };
+
+        for entries in [
+            vec![parent.clone(), nested.clone(), exact.clone()],
+            vec![nested.clone(), parent.clone(), exact.clone()],
+        ] {
+            let rules = validate_rules(entries, "dns-shunt.local", 60).unwrap();
+            let compiled = CompiledRules::new(rules.clone());
+
+            for query in ["www.sub.example.com", "www.sub.example.com."] {
+                assert_eq!(
+                    lookup_rule(&rules, query).unwrap().address,
+                    Ipv4Addr::new(192, 0, 2, 2)
+                );
+                assert_eq!(
+                    compiled.lookup(query).unwrap().address,
+                    Ipv4Addr::new(192, 0, 2, 2)
+                );
+            }
+            assert_eq!(
+                lookup_rule(&rules, "www.example.com").unwrap().address,
+                Ipv4Addr::new(192, 0, 2, 1)
+            );
+            assert_eq!(
+                compiled.lookup("www.example.com").unwrap().address,
+                Ipv4Addr::new(192, 0, 2, 1)
+            );
+            assert_eq!(
+                lookup_rule(&rules, "api.sub.example.com").unwrap().address,
+                Ipv4Addr::new(192, 0, 2, 3)
+            );
+            assert_eq!(
+                compiled.lookup("api.sub.example.com").unwrap().address,
+                Ipv4Addr::new(192, 0, 2, 3)
+            );
+            assert!(lookup_rule(&rules, "example.com").is_none());
+            assert!(compiled.lookup("example.com").is_none());
+            assert_eq!(
+                compiled.lookup("sub.example.com").unwrap().address,
+                Ipv4Addr::new(192, 0, 2, 1)
+            );
+        }
+
+        assert!(
+            validate_rules(
+                vec![
+                    RuleInput {
+                        name: "*.Example.com.".into(),
+                        address: "192.0.2.1".into(),
+                        ttl: None,
+                    },
+                    RuleInput {
+                        name: "*.example.com".into(),
+                        address: "192.0.2.2".into(),
+                        ttl: None,
+                    },
+                ],
+                "dns-shunt.local",
+                60,
+            )
+            .is_err()
+        );
     }
 
     #[test]
