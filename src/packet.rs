@@ -1,4 +1,4 @@
-use std::net::Ipv4Addr;
+use std::{net::Ipv4Addr, ops::Range};
 use thiserror::Error;
 
 const IPV4_HEADER_LEN: usize = 20;
@@ -20,7 +20,13 @@ pub enum PacketError {
     Malformed,
 }
 
+#[allow(dead_code)]
 pub fn parse_ipv4_udp(packet: &[u8]) -> Result<(FlowTuple, &[u8]), PacketError> {
+    let (tuple, payload_range) = parse_ipv4_udp_range(packet)?;
+    Ok((tuple, &packet[payload_range]))
+}
+
+pub fn parse_ipv4_udp_range(packet: &[u8]) -> Result<(FlowTuple, Range<usize>), PacketError> {
     if packet.len() < IPV4_HEADER_LEN || packet[0] >> 4 != 4 {
         return Err(PacketError::Malformed);
     }
@@ -49,7 +55,7 @@ pub fn parse_ipv4_udp(packet: &[u8]) -> Result<(FlowTuple, &[u8]), PacketError> 
         destination: Ipv4Addr::new(packet[16], packet[17], packet[18], packet[19]),
         destination_port: u16::from_be_bytes([packet[header_len + 2], packet[header_len + 3]]),
     };
-    Ok((tuple, &packet[header_len + UDP_HEADER_LEN..]))
+    Ok((tuple, header_len + UDP_HEADER_LEN..total_len))
 }
 
 pub fn build_ipv4_udp(tuple: FlowTuple, payload: &[u8]) -> Result<Vec<u8>, PacketError> {
@@ -152,6 +158,9 @@ mod tests {
         let (parsed, payload) = parse_ipv4_udp(&packet).unwrap();
         assert_eq!(parsed, response);
         assert_eq!(payload, b"dns answer");
+        let (parsed, payload_range) = parse_ipv4_udp_range(&packet).unwrap();
+        assert_eq!(parsed, response);
+        assert_eq!(&packet[payload_range], b"dns answer");
     }
 
     #[test]

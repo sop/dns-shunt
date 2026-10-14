@@ -7,6 +7,7 @@ pub struct Question {
     pub name: String,
     pub qtype: u16,
     pub qclass: u16,
+    question_end: usize,
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -17,7 +18,38 @@ pub enum DnsError {
     Unsupported,
 }
 
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum QueryClassification {
+    UnsupportedQuestion,
+    Eligible(Question),
+}
+
+struct ParsedQuestion {
+    id: u16,
+    qtype: u16,
+    qclass: u16,
+    question_end: usize,
+    label_offsets: [u16; 127],
+    label_count: usize,
+}
+
+#[allow(dead_code)]
 pub fn parse_query(message: &[u8]) -> Result<Question, DnsError> {
+    let parsed = parse_question(message)?;
+    validate_sections(message, parsed.question_end)?;
+    Ok(parsed.materialize(message))
+}
+
+pub(crate) fn classify_query(message: &[u8]) -> Result<QueryClassification, DnsError> {
+    let parsed = parse_question(message)?;
+    if parsed.qtype != 1 || parsed.qclass != 1 {
+        return Ok(QueryClassification::UnsupportedQuestion);
+    }
+    validate_sections(message, parsed.question_end)?;
+    Ok(QueryClassification::Eligible(parsed.materialize(message)))
+}
+
+fn parse_question(message: &[u8]) -> Result<ParsedQuestion, DnsError> {
     if message.len() < 12 {
         return Err(DnsError::Malformed);
     }
@@ -30,7 +62,9 @@ pub fn parse_query(message: &[u8]) -> Result<Question, DnsError> {
     }
 
     let mut offset = 12;
-    let mut labels = Vec::new();
+    let mut label_offsets = [0; 127];
+    let mut label_count = 0;
+    let mut wire_name_length = 0;
     loop {
         let length = *message.get(offset).ok_or(DnsError::Malformed)? as usize;
         offset += 1;
@@ -40,22 +74,20 @@ pub fn parse_query(message: &[u8]) -> Result<Question, DnsError> {
         if length > 63 || offset + length > message.len() {
             return Err(DnsError::Malformed);
         }
-        let label = std::str::from_utf8(&message[offset..offset + length])
-            .map_err(|_| DnsError::Malformed)?;
-        if !label
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
+        if !message[offset..offset + length]
+            .iter()
+            .all(|byte| byte.is_ascii_alphanumeric() || *byte == b'-' || *byte == b'_')
         {
             return Err(DnsError::Malformed);
         }
-        labels.push(label.to_ascii_lowercase());
+        if label_count == label_offsets.len() {
+            return Err(DnsError::Malformed);
+        }
+        label_offsets[label_count] = offset as u16 - 1;
+        label_count += 1;
+        wire_name_length += length + 1;
         offset += length;
-        if labels
-            .iter()
-            .map(|label: &String| label.len() + 1)
-            .sum::<usize>()
-            > 254
-        {
+        if wire_name_length > 254 {
             return Err(DnsError::Malformed);
         }
     }
@@ -64,11 +96,50 @@ pub fn parse_query(message: &[u8]) -> Result<Question, DnsError> {
     }
     let qtype = u16::from_be_bytes([message[offset], message[offset + 1]]);
     let qclass = u16::from_be_bytes([message[offset + 2], message[offset + 3]]);
+    Ok(ParsedQuestion {
+        id: u16::from_be_bytes([message[0], message[1]]),
+        qtype,
+        qclass,
+        question_end: offset + 4,
+        label_offsets,
+        label_count,
+    })
+}
+
+impl ParsedQuestion {
+    fn materialize(&self, message: &[u8]) -> Question {
+        let name_length = self.label_offsets[..self.label_count]
+            .iter()
+            .map(|&offset| message[offset as usize] as usize)
+            .sum::<usize>()
+            + self.label_count.saturating_sub(1);
+        let mut name = String::with_capacity(name_length);
+        for (index, &offset) in self.label_offsets[..self.label_count].iter().enumerate() {
+            if index > 0 {
+                name.push('.');
+            }
+            let start = offset as usize + 1;
+            let end = start + message[offset as usize] as usize;
+            for &byte in &message[start..end] {
+                name.push(byte.to_ascii_lowercase() as char);
+            }
+        }
+        Question {
+            id: self.id,
+            name,
+            qtype: self.qtype,
+            qclass: self.qclass,
+            question_end: self.question_end,
+        }
+    }
+}
+
+fn validate_sections(message: &[u8], question_end: usize) -> Result<(), DnsError> {
     let record_count = [6, 8, 10]
         .into_iter()
         .map(|index| u16::from_be_bytes([message[index], message[index + 1]]) as usize)
         .sum::<usize>();
-    let mut section_offset = offset + 4;
+    let mut section_offset = question_end;
     for _ in 0..record_count {
         section_offset = skip_name(message, section_offset)?;
         if section_offset + 10 > message.len() {
@@ -84,12 +155,7 @@ pub fn parse_query(message: &[u8]) -> Result<Question, DnsError> {
     if section_offset != message.len() {
         return Err(DnsError::Malformed);
     }
-    Ok(Question {
-        id: u16::from_be_bytes([message[0], message[1]]),
-        name: labels.join("."),
-        qtype,
-        qclass,
-    })
+    Ok(())
 }
 
 fn skip_name(message: &[u8], offset: usize) -> Result<usize, DnsError> {
@@ -137,22 +203,10 @@ pub fn build_a_response(
     if query.len() < 12 || question.qtype != 1 || question.qclass != 1 {
         return Err(DnsError::Unsupported);
     }
-    let mut question_end = 12;
-    loop {
-        let length = *query.get(question_end).ok_or(DnsError::Malformed)? as usize;
-        question_end += 1;
-        if length == 0 {
-            break;
-        }
-        if length > 63 || question_end + length > query.len() {
-            return Err(DnsError::Malformed);
-        }
-        question_end += length;
-    }
-    if question_end + 4 > query.len() {
+    let question_end = question.question_end;
+    if !(16..=query.len()).contains(&question_end) {
         return Err(DnsError::Malformed);
     }
-    question_end += 4;
 
     let mut response = Vec::with_capacity(query.len() + 16);
     response.extend_from_slice(&query[..question_end]);
@@ -244,5 +298,63 @@ mod tests {
         let mut trailing_data = query("example.com", 1);
         trailing_data.push(0);
         assert_eq!(parse_query(&trailing_data), Err(DnsError::Malformed));
+    }
+
+    #[test]
+    fn classifies_unsupported_question_before_validating_trailing_sections() {
+        let mut unsupported = query("example.com", 28);
+        unsupported[11] = 1;
+        unsupported.extend_from_slice(&[0, 0, 41, 4, 208, 0, 0, 0, 0, 0, 8]);
+        assert!(matches!(
+            classify_query(&unsupported),
+            Ok(QueryClassification::UnsupportedQuestion)
+        ));
+
+        let qtype_offset = unsupported.len() - 11 - 4;
+        unsupported[qtype_offset..qtype_offset + 2].copy_from_slice(&1u16.to_be_bytes());
+        assert_eq!(classify_query(&unsupported), Err(DnsError::Malformed));
+    }
+
+    #[test]
+    fn malformed_header_and_question_remain_errors_for_classifier() {
+        assert_eq!(classify_query(&[0; 5]), Err(DnsError::Malformed));
+
+        let mut unsupported_header = query("example.com", 28);
+        unsupported_header[2] |= 0x80;
+        assert_eq!(
+            classify_query(&unsupported_header),
+            Err(DnsError::Unsupported)
+        );
+
+        let mut malformed_question = query("example.com", 28);
+        malformed_question[13] = b'!';
+        assert_eq!(
+            classify_query(&malformed_question),
+            Err(DnsError::Malformed)
+        );
+    }
+
+    #[test]
+    fn enforces_wire_name_length_without_changing_the_limit() {
+        let maximum_name = format!(
+            "{}.{}.{}.{}",
+            "a".repeat(63),
+            "b".repeat(63),
+            "c".repeat(63),
+            "d".repeat(61)
+        );
+        let oversized_name = format!(
+            "{}.{}.{}.{}",
+            "a".repeat(63),
+            "b".repeat(63),
+            "c".repeat(63),
+            "d".repeat(62)
+        );
+
+        assert!(parse_query(&query(&maximum_name, 1)).is_ok());
+        assert_eq!(
+            parse_query(&query(&oversized_name, 1)),
+            Err(DnsError::Malformed)
+        );
     }
 }

@@ -27,6 +27,20 @@ cargo clippy --all-targets -- -D warnings
 cargo build --release
 ```
 
+Run the local interception-path microbenchmarks with:
+
+```powershell
+cargo bench --bench interception
+```
+
+The benchmark compares packet/payload copies on typical and EDNS-padded
+packets against an owned-buffer pass-through, full DNS parsing against early
+classification of unsupported questions, and linear rule scans/snapshot
+copies against compiled lookups and shared snapshots. It also measures
+uncontended receive-buffer locking. Each result is the median of five runs;
+WinDivert/kernel costs are excluded. Set `DNS_SHUNT_BENCH_ITERS` to adjust
+iterations per case (default: `200000`).
+
 ## Build The Windows Installer
 
 Build the machine-wide service installer on a Windows x64 host with the Rust

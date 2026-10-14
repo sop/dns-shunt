@@ -27,7 +27,6 @@ const WIN_DIVERT_FILTER: &str = concat!(
 
 struct CapturedAddress {
     address: WinDivertAddress<NetworkLayer>,
-    original_packet: Vec<u8>,
     tuple: Option<packet::FlowTuple>,
     terminal: Mutex<bool>,
 }
@@ -136,22 +135,22 @@ impl InterceptionBackend for WinDivertBackend {
             ))
         })?;
         let bytes = receive_buffer[..packet_length].to_vec();
-        let (tuple, dns_payload) = match packet::parse_ipv4_udp(&bytes) {
-            Ok((tuple, payload)) if tuple.destination_port == 53 => {
-                (Some(tuple), Some(payload.to_vec()))
+        let (tuple, dns_payload) = match packet::parse_ipv4_udp_range(&bytes) {
+            Ok((tuple, payload_range)) if tuple.destination_port == 53 => {
+                (Some(tuple), Some(payload_range))
             }
             _ => (None, None),
         };
         let metadata = CapturedAddress {
             address,
-            original_packet: bytes,
             tuple,
             terminal: Mutex::new(false),
         };
         Ok(CapturedPacket {
             context: FlowContext {
                 tuple,
-                backend_context: Arc::new(metadata),
+                original_packet: bytes,
+                backend_context: Box::new(metadata),
             },
             dns_payload,
         })
@@ -183,11 +182,22 @@ impl InterceptionBackend for WinDivertBackend {
         Ok(())
     }
 
-    fn reinject_original(&self, context: &FlowContext) -> Result<(), BackendError> {
-        let captured = validated_context(context)?;
+    fn reinject_original(&self, context: FlowContext) -> Result<(), BackendError> {
+        let FlowContext {
+            tuple,
+            original_packet,
+            backend_context,
+        } = context;
+        let captured = backend_context
+            .downcast::<CapturedAddress>()
+            .map_err(|_| BackendError("invalid WinDivert packet context".into()))?;
+        if tuple != captured.tuple {
+            return Err(BackendError(
+                "WinDivert packet tuple does not match context".into(),
+            ));
+        }
         let mut terminal = begin_terminal(&captured.terminal)?;
-        let mut packet =
-            unsafe { WinDivertPacket::<NetworkLayer>::new(captured.original_packet.clone()) };
+        let mut packet = unsafe { WinDivertPacket::<NetworkLayer>::new(original_packet) };
         packet.address = captured.address.clone();
         self.driver
             .send(&packet)
@@ -294,13 +304,13 @@ mod tests {
         };
         let captured = CapturedAddress {
             address: unsafe { WinDivertAddress::<NetworkLayer>::new() },
-            original_packet: vec![1, 2, 3],
             tuple: Some(tuple),
             terminal: Mutex::new(false),
         };
         let context = FlowContext {
             tuple: Some(tuple),
-            backend_context: Arc::new(captured),
+            original_packet: vec![1, 2, 3],
+            backend_context: Box::new(captured),
         };
         let metadata = validated_context(&context).unwrap();
         *begin_terminal(&metadata.terminal).unwrap() = true;
@@ -308,7 +318,8 @@ mod tests {
 
         let invalid_context = FlowContext {
             tuple: None,
-            backend_context: Arc::new(()),
+            original_packet: Vec::new(),
+            backend_context: Box::new(()),
         };
         assert!(validated_context(&invalid_context).is_err());
     }

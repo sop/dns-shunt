@@ -1,5 +1,11 @@
 use serde::{Deserialize, Serialize};
-use std::{collections::HashSet, fs, net::Ipv4Addr, path::Path, str::FromStr};
+use std::{
+    collections::{HashMap, HashSet},
+    fs,
+    net::Ipv4Addr,
+    path::Path,
+    str::FromStr,
+};
 use thiserror::Error;
 
 const DEFAULT_TTL: u32 = 60;
@@ -22,6 +28,53 @@ pub struct Rule {
     pub wildcard: bool,
     pub address: Ipv4Addr,
     pub ttl: u32,
+}
+
+#[derive(Debug)]
+pub(crate) struct CompiledRules {
+    rules: Vec<Rule>,
+    exact_names: HashMap<String, usize>,
+    wildcard_suffixes: HashMap<String, usize>,
+}
+
+impl CompiledRules {
+    pub(crate) fn new(rules: Vec<Rule>) -> Self {
+        let mut exact_names = HashMap::new();
+        let mut wildcard_suffixes = HashMap::new();
+        for (index, rule) in rules.iter().enumerate() {
+            let names = if rule.wildcard {
+                &mut wildcard_suffixes
+            } else {
+                &mut exact_names
+            };
+            names.entry(rule.name.clone()).or_insert(index);
+        }
+        Self {
+            rules,
+            exact_names,
+            wildcard_suffixes,
+        }
+    }
+
+    pub(crate) fn rules(&self) -> &[Rule] {
+        &self.rules
+    }
+
+    pub(crate) fn lookup_normalized(&self, query_name: &str) -> Option<&Rule> {
+        let index = self.exact_names.get(query_name).copied().or_else(|| {
+            query_name
+                .match_indices('.')
+                .find_map(|(dot, _)| self.wildcard_suffixes.get(&query_name[dot + 1..]))
+                .copied()
+        })?;
+        self.rules.get(index)
+    }
+
+    #[cfg(test)]
+    fn lookup(&self, query_name: &str) -> Option<&Rule> {
+        let name = query_name.trim_end_matches('.').to_ascii_lowercase();
+        self.lookup_normalized(&name)
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -130,7 +183,7 @@ pub fn validate_rules(
     Ok(rules)
 }
 
-#[cfg_attr(not(any(target_os = "windows", test)), allow(dead_code))]
+#[allow(dead_code)]
 pub fn lookup_rule<'a>(rules: &'a [Rule], query_name: &str) -> Option<&'a Rule> {
     let name = query_name.trim_end_matches('.').to_ascii_lowercase();
     rules
@@ -349,5 +402,43 @@ mod tests {
             },
         ];
         assert!(validate_rules(overlapping, "dns-shunt.local", 60).is_err());
+    }
+
+    #[test]
+    fn compiled_rules_match_exact_and_wildcard_names_by_label() {
+        let entries = vec![
+            RuleInput {
+                name: "*.example.net".into(),
+                address: "192.0.2.1".into(),
+                ttl: None,
+            },
+            RuleInput {
+                name: "api.example.net".into(),
+                address: "192.0.2.2".into(),
+                ttl: None,
+            },
+            RuleInput {
+                name: "*.example.com".into(),
+                address: "192.0.2.3".into(),
+                ttl: None,
+            },
+        ];
+        let rules = CompiledRules::new(validate_rules(entries, "dns-shunt.local", 60).unwrap());
+
+        assert_eq!(
+            rules.lookup_normalized("api.example.net").unwrap().address,
+            Ipv4Addr::new(192, 0, 2, 2)
+        );
+        assert_eq!(
+            rules.lookup_normalized("a.b.example.net").unwrap().address,
+            Ipv4Addr::new(192, 0, 2, 1)
+        );
+        assert!(rules.lookup_normalized("example.net").is_none());
+        assert!(rules.lookup_normalized("notexample.net").is_none());
+        assert_eq!(
+            rules.lookup("WWW.EXAMPLE.COM.").unwrap().address,
+            Ipv4Addr::new(192, 0, 2, 3)
+        );
+        assert!(lookup_rule(rules.rules(), "API.EXAMPLE.NET.").is_some());
     }
 }

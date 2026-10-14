@@ -1,20 +1,21 @@
 use crate::{
     admin::RuntimeState,
-    config::{Config, Rule},
+    config::{CompiledRules, Config, Rule},
     dns,
     packet::FlowTuple,
 };
-use std::{any::Any, sync::Arc};
+use std::{any::Any, ops::Range, sync::Arc};
 use thiserror::Error;
 
 pub struct FlowContext {
     pub tuple: Option<FlowTuple>,
-    pub backend_context: Arc<dyn Any + Send + Sync>,
+    pub original_packet: Vec<u8>,
+    pub backend_context: Box<dyn Any + Send + Sync>,
 }
 
 pub struct CapturedPacket {
     pub context: FlowContext,
-    pub dns_payload: Option<Vec<u8>>,
+    pub dns_payload: Option<Range<usize>>,
 }
 
 #[derive(Debug, Error)]
@@ -28,7 +29,7 @@ pub trait InterceptionBackend: Send + Sync + 'static {
         context: &FlowContext,
         dns_payload: &[u8],
     ) -> Result<(), BackendError>;
-    fn reinject_original(&self, context: &FlowContext) -> Result<(), BackendError>;
+    fn reinject_original(&self, context: FlowContext) -> Result<(), BackendError>;
     fn request_shutdown(&self) -> Result<(), BackendError> {
         Ok(())
     }
@@ -91,36 +92,44 @@ fn process_captured_packet(
     captured: CapturedPacket,
 ) {
     let context = captured.context;
-    let Some(payload) = captured.dns_payload.as_deref() else {
+    let Some(payload_range) = captured.dns_payload else {
         fail_open(
             backend,
-            &context,
+            context,
             runtime,
             "captured packet is not a valid IPv4 UDP DNS query",
         );
         return;
     };
-    let question = match dns::parse_query(payload) {
-        Ok(question) => question,
+    let Some(payload) = context.original_packet.get(payload_range) else {
+        fail_open(
+            backend,
+            context,
+            runtime,
+            "captured DNS payload range is outside the original packet",
+        );
+        return;
+    };
+    let question = match dns::classify_query(payload) {
+        Ok(dns::QueryClassification::Eligible(question)) => question,
+        Ok(dns::QueryClassification::UnsupportedQuestion) => {
+            reinject_or_log(backend, context, runtime);
+            return;
+        }
         Err(error) => {
             fail_open(
                 backend,
-                &context,
+                context,
                 runtime,
                 format!("DNS query parsing failed: {error}"),
             );
             return;
         }
     };
-
-    if question.qtype != 1 || question.qclass != 1 {
-        reinject_or_log(backend, &context, runtime);
-        return;
-    }
-    let snapshot = runtime.rules.snapshot();
+    let snapshot = runtime.rules.packet_snapshot();
     let Some(matched_override) = lookup_override(&snapshot, &config.gui_name, &question.name)
     else {
-        reinject_or_log(backend, &context, runtime);
+        reinject_or_log(backend, context, runtime);
         return;
     };
     let (address, ttl) = match &matched_override {
@@ -132,7 +141,7 @@ fn process_captured_packet(
         Err(error) => {
             fail_open(
                 backend,
-                &context,
+                context,
                 runtime,
                 format!("DNS override response build failed: {error}"),
             );
@@ -142,7 +151,7 @@ fn process_captured_packet(
     if let Err(error) = backend.inject_response(&context, &response) {
         fail_open(
             backend,
-            &context,
+            context,
             runtime,
             format!("DNS override response injection failed: {error}"),
         );
@@ -154,24 +163,26 @@ fn process_captured_packet(
     }
 }
 
-enum OverrideMatch {
+enum OverrideMatch<'a> {
     Builtin,
-    Rule(Rule),
+    Rule(&'a Rule),
 }
 
-fn lookup_override(rules: &[Rule], gui_name: &str, query_name: &str) -> Option<OverrideMatch> {
+fn lookup_override<'a>(
+    rules: &'a CompiledRules,
+    gui_name: &str,
+    query_name: &str,
+) -> Option<OverrideMatch<'a>> {
     if query_name.eq_ignore_ascii_case(gui_name) {
         Some(OverrideMatch::Builtin)
     } else {
-        crate::config::lookup_rule(rules, query_name)
-            .cloned()
-            .map(OverrideMatch::Rule)
+        rules.lookup_normalized(query_name).map(OverrideMatch::Rule)
     }
 }
 
 fn fail_open(
     backend: &dyn InterceptionBackend,
-    context: &FlowContext,
+    context: FlowContext,
     runtime: &RuntimeState,
     error: impl Into<String>,
 ) {
@@ -182,7 +193,7 @@ fn fail_open(
 
 fn reinject_or_log(
     backend: &dyn InterceptionBackend,
-    context: &FlowContext,
+    context: FlowContext,
     runtime: &RuntimeState,
 ) {
     if let Err(error) = backend.reinject_original(context) {
@@ -204,8 +215,6 @@ mod tests {
         },
         time::{SystemTime, UNIX_EPOCH},
     };
-
-    struct OriginalPayload(Option<Vec<u8>>);
 
     #[derive(Default)]
     struct MockBackend {
@@ -236,15 +245,11 @@ mod tests {
             Ok(())
         }
 
-        fn reinject_original(&self, context: &FlowContext) -> Result<(), BackendError> {
-            let original = context
-                .backend_context
-                .downcast_ref::<OriginalPayload>()
-                .ok_or_else(|| BackendError("invalid mock packet context".into()))?;
+        fn reinject_original(&self, context: FlowContext) -> Result<(), BackendError> {
             self.reinjections
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .push(original.0.clone());
+                .push(Some(context.original_packet));
             Ok(())
         }
     }
@@ -262,19 +267,37 @@ mod tests {
         payload
     }
 
-    fn packet(payload: Option<Vec<u8>>) -> CapturedPacket {
-        let tuple = FlowTuple {
+    fn test_tuple() -> FlowTuple {
+        FlowTuple {
             source: Ipv4Addr::new(192, 0, 2, 10),
             source_port: 53000,
             destination: Ipv4Addr::new(198, 51, 100, 53),
             destination_port: 53,
+        }
+    }
+
+    fn wire_packet(payload: &[u8]) -> Vec<u8> {
+        crate::packet::build_ipv4_udp(test_tuple(), payload).unwrap()
+    }
+
+    fn packet(payload: Option<Vec<u8>>) -> CapturedPacket {
+        let tuple = test_tuple();
+        let (original_packet, dns_payload) = match payload {
+            Some(payload) => {
+                let original_packet = wire_packet(&payload);
+                let (_, payload_range) =
+                    crate::packet::parse_ipv4_udp_range(&original_packet).unwrap();
+                (original_packet, Some(payload_range))
+            }
+            None => (Vec::new(), None),
         };
         CapturedPacket {
             context: FlowContext {
                 tuple: Some(tuple),
-                backend_context: Arc::new(OriginalPayload(payload.clone())),
+                original_packet,
+                backend_context: Box::new(()),
             },
-            dns_payload: payload,
+            dns_payload,
         }
     }
 
@@ -334,7 +357,10 @@ mod tests {
         let reinjections = backend.reinjections.lock().unwrap();
         assert_eq!(
             *reinjections,
-            packets.iter().cloned().map(Some).collect::<Vec<_>>()
+            packets
+                .iter()
+                .map(|payload| Some(wire_packet(payload)))
+                .collect::<Vec<_>>()
         );
         assert!(backend.responses.lock().unwrap().is_empty());
         let status = runtime.status();
@@ -349,9 +375,103 @@ mod tests {
         let backend = MockBackend::default();
         let malformed = vec![1, 2, 3];
         process_captured_packet(&backend, &config, &runtime, packet(Some(malformed.clone())));
-        assert_eq!(*backend.reinjections.lock().unwrap(), vec![Some(malformed)]);
+        assert_eq!(
+            *backend.reinjections.lock().unwrap(),
+            vec![Some(wire_packet(&malformed))]
+        );
         assert_eq!(runtime.status()["overrides"], 0);
         assert_eq!(runtime.status()["fail_open"], 1);
+    }
+
+    #[test]
+    fn unsupported_header_and_malformed_question_keep_fail_open_diagnostics() {
+        let (config, runtime) = runtime();
+        let backend = MockBackend::default();
+        let mut unsupported_header = query(8, "match.example", 1, 1);
+        unsupported_header[2] |= 0x80;
+        let mut malformed_question = query(9, "match.example", 28, 1);
+        malformed_question[13] = b'!';
+
+        process_captured_packet(
+            &backend,
+            &config,
+            &runtime,
+            packet(Some(unsupported_header.clone())),
+        );
+        process_captured_packet(
+            &backend,
+            &config,
+            &runtime,
+            packet(Some(malformed_question.clone())),
+        );
+
+        assert_eq!(
+            *backend.reinjections.lock().unwrap(),
+            vec![
+                Some(wire_packet(&unsupported_header)),
+                Some(wire_packet(&malformed_question)),
+            ]
+        );
+        assert_eq!(runtime.status()["fail_open"], 2);
+        assert_eq!(runtime.status()["errors"], 2);
+    }
+
+    #[test]
+    fn unsupported_question_bypasses_malformed_trailing_sections_without_metrics() {
+        let (config, runtime) = runtime();
+        let backend = MockBackend::default();
+        let mut unsupported = query(5, "match.example", 28, 1);
+        unsupported[11] = 1;
+        unsupported.extend_from_slice(&[0, 0, 41, 4, 208, 0, 0, 0, 0, 0, 8]);
+
+        process_captured_packet(
+            &backend,
+            &config,
+            &runtime,
+            packet(Some(unsupported.clone())),
+        );
+
+        assert_eq!(
+            *backend.reinjections.lock().unwrap(),
+            vec![Some(wire_packet(&unsupported))]
+        );
+        assert_eq!(runtime.status()["fail_open"], 0);
+        assert_eq!(runtime.status()["errors"], 0);
+        assert_eq!(runtime.status()["overrides"], 0);
+    }
+
+    #[test]
+    fn malformed_trailing_sections_on_a_in_query_remain_fail_open() {
+        let (config, runtime) = runtime();
+        let backend = MockBackend::default();
+        let mut malformed = query(6, "match.example", 1, 1);
+        malformed[11] = 1;
+        malformed.extend_from_slice(&[0, 0, 41, 4, 208, 0, 0, 0, 0, 0, 8]);
+
+        process_captured_packet(&backend, &config, &runtime, packet(Some(malformed.clone())));
+
+        assert_eq!(
+            *backend.reinjections.lock().unwrap(),
+            vec![Some(wire_packet(&malformed))]
+        );
+        assert_eq!(runtime.status()["fail_open"], 1);
+        assert_eq!(runtime.status()["errors"], 1);
+        assert_eq!(runtime.status()["overrides"], 0);
+    }
+
+    #[test]
+    fn invalid_dns_payload_range_fails_open_without_slicing_packet() {
+        let (config, runtime) = runtime();
+        let backend = MockBackend::default();
+        let mut captured = packet(Some(query(7, "match.example", 1, 1)));
+        captured.dns_payload = Some(0..captured.context.original_packet.len() + 1);
+        let original = captured.context.original_packet.clone();
+
+        process_captured_packet(&backend, &config, &runtime, captured);
+
+        assert_eq!(*backend.reinjections.lock().unwrap(), vec![Some(original)]);
+        assert_eq!(runtime.status()["fail_open"], 1);
+        assert_eq!(runtime.status()["errors"], 1);
     }
 
     #[test]
@@ -362,7 +482,10 @@ mod tests {
         let original = query(4, "match.example", 1, 1);
         process_captured_packet(&backend, &config, &runtime, packet(Some(original.clone())));
         assert_eq!(backend.response_attempts.load(Ordering::Relaxed), 1);
-        assert_eq!(*backend.reinjections.lock().unwrap(), vec![Some(original)]);
+        assert_eq!(
+            *backend.reinjections.lock().unwrap(),
+            vec![Some(wire_packet(&original))]
+        );
         assert_eq!(runtime.status()["overrides"], 0);
         assert_eq!(runtime.status()["fail_open"], 1);
         assert_eq!(runtime.status()["errors"], 1);
@@ -380,6 +503,7 @@ mod tests {
             60,
         )
         .unwrap();
+        let rules = CompiledRules::new(rules);
         assert!(matches!(
             lookup_override(&rules, "dns-shunt.local", "DNS-SHUNT.LOCAL"),
             Some(OverrideMatch::Builtin)

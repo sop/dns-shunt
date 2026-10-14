@@ -1,10 +1,10 @@
-use crate::config::{self, ConfigError, Rule, RuleInput};
+use crate::config::{self, CompiledRules, ConfigError, Rule, RuleInput};
 use std::{
     fs::{self, OpenOptions},
     io::Write,
     path::{Path, PathBuf},
     sync::{
-        Mutex, RwLock,
+        Arc, Mutex, RwLock,
         atomic::{AtomicU64, Ordering},
     },
 };
@@ -16,7 +16,7 @@ pub struct RuleManager {
     path: PathBuf,
     reserved_name: String,
     default_ttl: u32,
-    snapshot: RwLock<Vec<Rule>>,
+    snapshot: RwLock<Arc<CompiledRules>>,
     mutation: Mutex<()>,
 }
 
@@ -48,16 +48,22 @@ impl RuleManager {
             path,
             reserved_name,
             default_ttl,
-            snapshot: RwLock::new(rules),
+            snapshot: RwLock::new(Arc::new(CompiledRules::new(rules))),
             mutation: Mutex::new(()),
         })
     }
 
     pub fn snapshot(&self) -> Vec<Rule> {
-        self.snapshot
-            .read()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .clone()
+        self.packet_snapshot().rules().to_vec()
+    }
+
+    pub(crate) fn packet_snapshot(&self) -> Arc<CompiledRules> {
+        Arc::clone(
+            &self
+                .snapshot
+                .read()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()),
+        )
     }
 
     pub fn store_path(&self) -> &Path {
@@ -76,11 +82,12 @@ impl RuleManager {
         let proposed = change(&current).map_err(RuleStoreError::Update)?;
         let validated =
             config::validate_rules(proposed.clone(), &self.reserved_name, self.default_ttl)?;
+        let compiled = Arc::new(CompiledRules::new(validated.clone()));
         persist(&self.path, &proposed)?;
         *self
             .snapshot
             .write()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()) = validated.clone();
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = compiled;
         Ok(validated)
     }
 }
@@ -209,9 +216,21 @@ mod tests {
         manager
             .transact(|_| Ok(vec![input("one.example", "192.0.2.1")]))
             .unwrap();
+        let prior_snapshot = manager.packet_snapshot();
+        assert!(
+            manager
+                .packet_snapshot()
+                .lookup_normalized("one.example")
+                .is_some()
+        );
         manager
             .transact(|_| Ok(vec![input("two.example", "192.0.2.2")]))
             .unwrap();
+        let packet_snapshot = manager.packet_snapshot();
+        assert!(prior_snapshot.lookup_normalized("one.example").is_some());
+        assert!(prior_snapshot.lookup_normalized("two.example").is_none());
+        assert!(packet_snapshot.lookup_normalized("one.example").is_none());
+        assert!(packet_snapshot.lookup_normalized("two.example").is_some());
         let reopened = RuleManager::load(path.clone(), "dns-shunt.local".into(), 60).unwrap();
         assert_eq!(reopened.snapshot()[0].name, "two.example");
         assert!(!fs::read_to_string(&path).unwrap().contains("query"));
@@ -229,12 +248,20 @@ mod tests {
         manager
             .transact(|_| Ok(vec![input("old.example", "192.0.2.1")]))
             .unwrap();
+        let active_snapshot = manager.packet_snapshot();
         assert!(
             manager
                 .transact(|_| Ok(vec![input("dns-shunt.local", "192.0.2.2")]))
                 .is_err()
         );
         assert_eq!(manager.snapshot()[0].name, "old.example");
+        assert!(
+            manager
+                .packet_snapshot()
+                .lookup_normalized("old.example")
+                .is_some()
+        );
+        assert!(Arc::ptr_eq(&active_snapshot, &manager.packet_snapshot()));
 
         fs::remove_file(&path).unwrap();
         fs::remove_dir(path.parent().unwrap()).unwrap();
@@ -245,6 +272,13 @@ mod tests {
                 .is_err()
         );
         assert_eq!(manager.snapshot()[0].name, "old.example");
+        assert!(
+            manager
+                .packet_snapshot()
+                .lookup_normalized("old.example")
+                .is_some()
+        );
+        assert!(Arc::ptr_eq(&active_snapshot, &manager.packet_snapshot()));
         let _ = fs::remove_file(path.parent().unwrap());
     }
 }
