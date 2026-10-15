@@ -19,6 +19,21 @@ function Stop-WithError {
     throw "build-installer: $Message"
 }
 
+function Get-ArchiveSha256 {
+    param([Parameter(Mandatory = $true)][string]$Path)
+
+    try {
+        return (Get-FileHash -LiteralPath $Path -Algorithm SHA256 `
+            -ErrorAction Stop).Hash
+    }
+    catch {
+        Stop-WithError (
+            "could not read WinDivert archive for SHA-256 validation: " +
+            "$Path ($($_.Exception.Message))"
+        )
+    }
+}
+
 function Copy-ArchiveEntry {
     param(
         [Parameter(Mandatory = $true)]
@@ -92,8 +107,7 @@ if (-not (Test-Path -LiteralPath $archivePath -PathType Leaf)) {
         [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
         Invoke-WebRequest -Uri $assetUrl -OutFile $downloadPath -UseBasicParsing
         $downloaded = Get-Item -LiteralPath $downloadPath
-        $downloadHash = (Get-FileHash -LiteralPath $downloadPath `
-            -Algorithm SHA256).Hash
+        $downloadHash = Get-ArchiveSha256 -Path $downloadPath
         if ($downloaded.Length -ne $archiveSize -or
             $downloadHash -ne $archiveSha256) {
             Stop-WithError "downloaded WinDivert archive failed size or SHA-256 validation."
@@ -111,7 +125,7 @@ $archiveItem = Get-Item -LiteralPath $archivePath
 if ($archiveItem.Length -ne $archiveSize) {
     Stop-WithError "unexpected WinDivert archive size: $($archiveItem.Length) bytes."
 }
-$archiveHash = (Get-FileHash -LiteralPath $archivePath -Algorithm SHA256).Hash
+$archiveHash = Get-ArchiveSha256 -Path $archivePath
 if ($archiveHash -ne $archiveSha256) {
     Stop-WithError "WinDivert archive SHA-256 mismatch: $archiveHash"
 }

@@ -1,6 +1,11 @@
 [package]
 name = "dns-shunt"
+description = "DNS override and interception utility"
 version = "0.1.0"
+authors = ["Joni Kollani <joni.kollani@gmail.com>"]
+license = "MIT"
+homepage = "https://github.com/sop/dns-shunt"
+repository = "https://github.com/sop/dns-shunt"
 edition = "2024"
 
 [[bench]]
@@ -14,6 +19,7 @@ thiserror = "2"
 toml = "0.8"
 
 [build-dependencies]
+chrono = "0.4"
 winres = "0.1"
 
 [target.'cfg(target_os = "windows")'.dependencies]

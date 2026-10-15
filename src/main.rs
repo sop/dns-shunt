@@ -42,6 +42,10 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         print_help();
         return Ok(());
     }
+    if arguments.version {
+        println!("{}", version_string());
+        return Ok(());
+    }
     if let Some(command) = arguments.service_command {
         #[cfg(target_os = "windows")]
         return service::manage(command);
@@ -90,6 +94,7 @@ struct Arguments {
     service_mode: bool,
     service_command: Option<ServiceCommand>,
     help: bool,
+    version: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -108,6 +113,7 @@ fn parse_arguments(
     let mut service_command = None;
     let mut service_command_count = 0;
     let mut help = false;
+    let mut version = false;
     let mut args = args.into_iter();
 
     while let Some(arg) = args.next() {
@@ -131,6 +137,7 @@ fn parse_arguments(
                 service_command_count += 1;
             }
             "--help" | "-h" => help = true,
+            "--version" => version = true,
             _ => {
                 return Err(format!("unknown argument: {arg}; use --help").into());
             }
@@ -147,13 +154,23 @@ fn parse_arguments(
     if has_management_command && (config_path.is_some() || enable_capture) {
         return Err("service-management commands cannot be combined with other options".into());
     }
+    if version
+        && (config_path.is_some() || enable_capture || service_mode || has_management_command)
+    {
+        return Err("--version cannot be combined with other options".into());
+    }
     Ok(Arguments {
         config_path,
         enable_capture,
         service_mode,
         service_command,
         help,
+        version,
     })
+}
+
+fn version_string() -> String {
+    format!("{} {}", env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION"))
 }
 
 #[cfg(target_os = "windows")]
@@ -199,6 +216,7 @@ fn run_capture(
 fn print_help() {
     println!(concat!(
         "dns-shunt --config <path> [--run]\n",
+        "dns-shunt --version\n",
         "dns-shunt --service (Windows Service Control Manager only)\n\n",
         "dns-shunt --stop-service | --install-service | --uninstall-service\n\n",
         "Validate config by default. --run starts the loopback web admin ",
@@ -227,6 +245,30 @@ mod tests {
             ])
             .is_err()
         );
+    }
+
+    #[test]
+    fn version_is_standalone_and_does_not_require_configuration() {
+        let args = parse_arguments(["--version".to_owned()]).unwrap();
+        assert!(args.version);
+        assert!(args.config_path.is_none());
+        assert_eq!(
+            version_string(),
+            format!("{} {}", env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION"))
+        );
+
+        for arguments in [
+            vec![
+                "--version".to_owned(),
+                "--config".to_owned(),
+                "config.toml".to_owned(),
+            ],
+            vec!["--version".to_owned(), "--run".to_owned()],
+            vec!["--version".to_owned(), "--service".to_owned()],
+            vec!["--version".to_owned(), "--install-service".to_owned()],
+        ] {
+            assert!(parse_arguments(arguments).is_err());
+        }
     }
 
     #[test]
