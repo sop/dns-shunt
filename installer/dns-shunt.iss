@@ -1,5 +1,4 @@
 #define AppName "DNS Shunt"
-#define AppVersion "0.1.0"
 #define AppPublisher "DNS Shunt"
 #define AppExe "dns-shunt.exe"
 #define TrayExe "dns-shunt-tray.exe"
@@ -16,7 +15,7 @@ DefaultDirName={autopf}\DNS Shunt
 DefaultGroupName=DNS Shunt
 DisableProgramGroupPage=yes
 OutputDir=..\dist
-OutputBaseFilename=DNS-Shunt-Setup
+OutputBaseFilename=DNS-Shunt-Setup-{#AppVersion}
 ArchitecturesAllowed=x64os
 ArchitecturesInstallIn64BitMode=x64os
 MinVersion=10.0
@@ -24,6 +23,8 @@ PrivilegesRequired=admin
 Uninstallable=yes
 WizardStyle=modern
 SetupIconFile=..\assets\dns-shunt.ico
+WizardSmallImageFile=..\assets\dns-shunt-small.bmp
+UninstallDisplayIcon={app}\{#AppExe}
 CloseApplications=yes
 RestartApplications=no
 
@@ -37,27 +38,12 @@ Source: "{#SourceDir}\WinDivert64.sys"; DestDir: "{app}"; Flags: ignoreversion n
 Source: "{#SourceDir}\dns-shunt.example.toml"; DestDir: "{app}"; Flags: ignoreversion notimestamp
 
 [Icons]
-Name: "{group}\DNS Shunt Dashboard"; Filename: "{sys}\explorer.exe"; Parameters: "http://dns-shunt.local:53080"; IconFilename: "{app}\{#AppExe}"
+Name: "{group}\DNS Shunt Tray"; Filename: "{app}\{#TrayExe}"
 
 [Registry]
 Root: HKLM; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: string; ValueName: "DNS Shunt Tray"; ValueData: """{app}\{#TrayExe}"""; Flags: uninsdeletevalue
 
 [Code]
-function InitializeSetup(): Boolean;
-var
-  Consent: Integer;
-begin
-  Consent := MsgBox(
-    'Installing DNS Shunt enables machine-wide DNS capture. The service ' +
-    'starts automatically as LocalSystem and inspects outbound IPv4 UDP ' +
-    'DNS traffic. Only matching configured A records are overridden; other ' +
-    'traffic continues to the resolver selected by Windows. Adapter DNS ' +
-    'settings and resolver selection are not changed.' + #13#10 + #13#10 +
-    'Install and start the DNS capture service?',
-    mbConfirmation, MB_YESNO or MB_DEFBUTTON2);
-  Result := Consent = IDYES;
-end;
-
 function PrepareToInstall(var NeedsRestart: Boolean): String;
 var
   ExitCode: Integer;

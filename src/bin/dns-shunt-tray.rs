@@ -39,12 +39,12 @@ mod tray {
             },
             WindowsAndMessaging::{
                 AppendMenuW, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyMenu,
-                DispatchMessageW, FindWindowW, GetCursorPos, GetMessageW, IDI_APPLICATION,
-                LoadIconW, MB_ICONERROR, MB_ICONWARNING, MB_OK, MB_YESNO, MF_GRAYED, MF_STRING,
-                MessageBoxW, PostMessageW, PostQuitMessage, RegisterClassW, SW_HIDE, SW_SHOWNORMAL,
-                SetForegroundWindow, SetTimer, ShowWindow, TPM_RETURNCMD, TrackPopupMenu,
-                TranslateMessage, WM_CLOSE, WM_COMMAND, WM_CONTEXTMENU, WM_DESTROY,
-                WM_LBUTTONDBLCLK, WM_NULL, WM_RBUTTONUP, WM_TIMER, WNDCLASSW, WS_OVERLAPPED,
+                DispatchMessageW, FindWindowW, GetCursorPos, GetMessageW, LoadIconW, MB_ICONERROR,
+                MB_OK, MF_GRAYED, MF_STRING, MessageBoxW, PostMessageW, PostQuitMessage,
+                RegisterClassW, SW_HIDE, SW_SHOWNORMAL, SetForegroundWindow, SetTimer, ShowWindow,
+                TPM_RETURNCMD, TrackPopupMenu, TranslateMessage, WM_CLOSE, WM_COMMAND,
+                WM_CONTEXTMENU, WM_DESTROY, WM_LBUTTONDBLCLK, WM_NULL, WM_RBUTTONUP, WM_TIMER,
+                WNDCLASSW, WS_OVERLAPPED,
             },
         },
     };
@@ -187,7 +187,12 @@ mod tray {
     }
 
     fn add_tray_icon(hwnd: HWND) -> Result<(), String> {
-        let icon = unsafe { LoadIconW(ptr::null_mut(), IDI_APPLICATION) };
+        let instance = unsafe { GetModuleHandleW(ptr::null()) };
+        let icon_resource = ptr::without_provenance::<u16>(1);
+        let icon = unsafe { LoadIconW(instance, icon_resource) };
+        if icon.is_null() {
+            return Err("could not load the DNS Shunt application icon".to_owned());
+        }
         let mut data = NOTIFYICONDATAW {
             cbSize: std::mem::size_of::<NOTIFYICONDATAW>() as u32,
             hWnd: hwnd,
@@ -325,25 +330,15 @@ mod tray {
     fn dispatch_command(hwnd: HWND, command: u32) {
         match command {
             MENU_START => {
-                if current_state() == ServiceState::Stopped {
-                    let answer = unsafe {
-                        MessageBoxW(
-                            hwnd,
-                            wide("Close the rules editor before starting the service. The service locks the shared rules file while running. Start DNS Shunt now?").as_ptr(),
-                            wide("Start DNS Shunt").as_ptr(),
-                            MB_YESNO | MB_ICONWARNING,
-                        )
-                    };
-                    if answer == 6
-                        && let Err(error) = start_service()
-                    {
-                        show_error(
-                            hwnd,
-                            &format!(
-                                "Could not start the DNS Shunt service. Check the Application event log and service configuration. {error}"
-                            ),
-                        );
-                    }
+                if current_state() == ServiceState::Stopped
+                    && let Err(error) = start_service()
+                {
+                    show_error(
+                        hwnd,
+                        &format!(
+                            "Could not start the DNS Shunt service. Check the Application event log and service configuration. {error}"
+                        ),
+                    );
                 }
             }
             MENU_STOP => {

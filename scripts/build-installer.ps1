@@ -2,6 +2,7 @@ $ErrorActionPreference = "Stop"
 
 $projectRoot = Split-Path -Parent $PSScriptRoot
 $target = "x86_64-pc-windows-msvc"
+$manifestPath = Join-Path $projectRoot "Cargo.toml"
 $version = "2.2.2"
 $archiveName = "WinDivert-$version-A.zip"
 $archiveSize = 405137
@@ -68,6 +69,25 @@ if ($null -eq $rustc -or $null -eq $cargo -or $null -eq $rustup) {
     Stop-WithError "Rust, Cargo, and rustup must be available on PATH."
 }
 
+$metadataOutput = & $cargo.Source metadata --no-deps --format-version 1 `
+    --manifest-path $manifestPath
+if ($LASTEXITCODE -ne 0) {
+    Stop-WithError "could not read the application version from Cargo metadata."
+}
+try {
+    $metadata = ConvertFrom-Json -InputObject (
+        $metadataOutput -join [Environment]::NewLine
+    ) -ErrorAction Stop
+}
+catch {
+    Stop-WithError "Cargo metadata returned invalid JSON."
+}
+$appPackages = @($metadata.packages | Where-Object { $_.name -eq "dns-shunt" })
+if ($appPackages.Count -ne 1) {
+    Stop-WithError "Cargo metadata did not identify the dns-shunt package."
+}
+$appVersion = $appPackages[0].version
+
 $compilerInfo = & $rustc.Source -Vv
 if ($LASTEXITCODE -ne 0) {
     Stop-WithError "could not inspect the active Rust toolchain."
@@ -131,7 +151,7 @@ if ($archiveHash -ne $archiveSha256) {
     Stop-WithError "WinDivert archive SHA-256 mismatch: $archiveHash"
 }
 
-$installerPath = Join-Path $distDirectory "DNS-Shunt-Setup.exe"
+$installerPath = Join-Path $distDirectory "DNS-Shunt-Setup-$appVersion.exe"
 if (Test-Path -LiteralPath $installerPath) {
     Remove-Item -LiteralPath $installerPath -Force
 }
@@ -141,7 +161,7 @@ if (Test-Path -LiteralPath $stageDirectory) {
 
 Write-Output "Building $target release executable."
 & $cargo.Source build --release --target $target `
-    --manifest-path (Join-Path $projectRoot "Cargo.toml")
+    --manifest-path $manifestPath
 if ($LASTEXITCODE -ne 0) {
     Stop-WithError "cargo build failed with exit code $LASTEXITCODE."
 }
@@ -200,7 +220,8 @@ foreach ($asset in @(
 }
 
 Write-Output "Compiling the Inno Setup installer."
-& $isccPath "/DSourceDir=$stageDirectory" $installerDefinition
+& $isccPath "/DAppVersion=$appVersion" "/DSourceDir=$stageDirectory" `
+    $installerDefinition
 if ($LASTEXITCODE -ne 0) {
     Stop-WithError "Inno Setup compilation failed with exit code $LASTEXITCODE."
 }

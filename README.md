@@ -59,12 +59,11 @@ are isolated under `dist\`; the workflow does not modify
 `target\debug`/`target\release` runtime assets or stop an active WinDivert
 driver.
 
-The installer requires administrator privileges and Windows 10/11 x64. Before
-installing or starting the automatic `LocalSystem` service, setup explains
-that installation enables machine-wide DNS capture and asks for explicit
-consent. It does not change adapter DNS settings or resolver selection. The
-target computer does not need PowerShell. Uninstall stops and removes the
-service and installer-owned files while preserving
+The installer requires administrator privileges and Windows 10/11 x64. It
+installs and starts the automatic `LocalSystem` service without changing
+adapter DNS settings or resolver selection. The target computer does not need
+PowerShell. Uninstall stops and removes the service and installer-owned files
+while preserving
 `%ProgramData%\dns-shunt\config.toml` and
 `%ProgramData%\dns-shunt\rules\rules.json`.
 
@@ -165,10 +164,9 @@ starts the automatic service. The shared rules file is under
 the service is stopped. The service revokes that access before loading rules
 and restores it after shutdown or a handled startup failure. The tray disables
 Open Rules File while running and disables Open GUI while stopped. Starting
-the service prompts users to close any rules editor first. The installer
-stages both executables, the signed WinDivert runtime, and example
-configuration under `%ProgramFiles%\DNS Shunt`. Check status and startup
-diagnostics with:
+the service from the tray does not require confirmation. The installer stages
+both executables, the signed WinDivert runtime, and example configuration under
+`%ProgramFiles%\DNS Shunt`. Check status and startup diagnostics with:
 
 ```powershell
 Get-Service DnsShunt

@@ -45,7 +45,11 @@ fi
 "${image_command[@]}" "$temp_dir/master.png" \
   -define icon:auto-resize=256,128,64,48,32,24,16 \
   "$temp_dir/dns-shunt.ico"
+"${image_command[@]}" "$temp_dir/master.png" -resize 55x55 \
+  -gravity center -background white -extent 55x58 -alpha remove -alpha off \
+  "$temp_dir/dns-shunt-small.bmp"
 
 mv -- "$temp_dir/dns-shunt.png" "$assets_dir/dns-shunt.png"
 mv -- "$temp_dir/dns-shunt.ico" "$assets_dir/dns-shunt.ico"
-printf 'Generated assets/dns-shunt.png and assets/dns-shunt.ico\n'
+mv -- "$temp_dir/dns-shunt-small.bmp" "$assets_dir/dns-shunt-small.bmp"
+printf 'Generated application icon assets\n'

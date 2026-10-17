@@ -459,7 +459,9 @@ fn prepare_service_data() -> Result<(), Box<dyn Error>> {
         .into()
     })?;
     crate::service_paths::migrate_rules(&paths)?;
-    set_rules_edit_access_with_owner(&paths, true, Some("BA"))?;
+    // The DACL grants stopped-service rule editing directly. Preserve the
+    // existing owner; it may be SYSTEM from a previous service run.
+    set_rules_edit_access_with_owner(&paths, true, None)?;
     Ok(())
 }
 
@@ -552,6 +554,7 @@ fn set_path_security_with_owner(
     }
     let path_wide = wide(&path.to_string_lossy());
     let mut security_information = DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION;
+    let mut owner_matches = owner.is_none();
     if owner.is_some() {
         let mut current_owner = ptr::null_mut();
         let mut current_descriptor: PSECURITY_DESCRIPTOR = ptr::null_mut();
@@ -587,12 +590,29 @@ fn set_path_security_with_owner(
             return Err(last_error("could not read the requested or current owner"));
         }
 
-        let owner_matches = unsafe { EqualSid(current_owner, requested_owner) } != 0;
+        owner_matches = unsafe { EqualSid(current_owner, requested_owner) } != 0;
         unsafe {
             let _ = LocalFree(current_descriptor);
         }
         if !owner_matches {
             security_information |= OWNER_SECURITY_INFORMATION;
+        }
+    }
+    if owner_matches {
+        match path_dacl_sddl(path) {
+            Ok(current_dacl) if current_dacl == sddl => {
+                unsafe {
+                    let _ = LocalFree(descriptor);
+                }
+                return Ok(());
+            }
+            Ok(_) => {}
+            Err(error) => {
+                unsafe {
+                    let _ = LocalFree(descriptor);
+                }
+                return Err(error);
+            }
         }
     }
     let secured = unsafe { SetFileSecurityW(path_wide.as_ptr(), security_information, descriptor) };
@@ -674,8 +694,7 @@ fn grant_service_control_to_users(service: &ServiceHandle) -> Result<(), Box<dyn
     Ok(())
 }
 
-#[cfg(test)]
-fn security_descriptor_sddl(path: &Path) -> Result<String, Box<dyn Error>> {
+fn path_dacl_sddl(path: &Path) -> Result<String, Box<dyn Error>> {
     use windows_sys::Win32::Security::Authorization::{
         ConvertSecurityDescriptorToStringSecurityDescriptorW, GetNamedSecurityInfoW, SE_FILE_OBJECT,
     };
@@ -1024,34 +1043,27 @@ mod tests {
         fs::write(&paths.rules, b"[]\n").unwrap();
 
         set_path_security_with_owner(&paths.config, CONFIG_SDDL, None).unwrap();
-        let config_acl = security_descriptor_sddl(&paths.config).unwrap();
+        let config_acl = path_dacl_sddl(&paths.config).unwrap();
         assert!(config_acl.contains(";;;BU)"));
         assert!(!config_acl.contains("0x1301bf;;;BU"));
 
         set_rules_edit_access_with_owner(&paths, true, None).unwrap();
+        set_rules_edit_access_with_owner(&paths, true, None).unwrap();
         assert!(
-            security_descriptor_sddl(&paths.rules_dir)
+            path_dacl_sddl(&paths.rules_dir)
                 .unwrap()
                 .contains("0x1301bf;;;BU")
         );
         assert!(
-            security_descriptor_sddl(&paths.rules)
+            path_dacl_sddl(&paths.rules)
                 .unwrap()
                 .contains("0x1301bf;;;BU")
         );
 
         set_rules_edit_access_with_owner(&paths, false, None).unwrap();
-        assert!(
-            !security_descriptor_sddl(&paths.rules_dir)
-                .unwrap()
-                .contains(";;;BU)")
-        );
-        assert!(
-            !security_descriptor_sddl(&paths.rules)
-                .unwrap()
-                .contains(";;;BU)")
-        );
-        assert_eq!(security_descriptor_sddl(&paths.config).unwrap(), config_acl);
+        assert!(!path_dacl_sddl(&paths.rules_dir).unwrap().contains(";;;BU)"));
+        assert!(!path_dacl_sddl(&paths.rules).unwrap().contains(";;;BU)"));
+        assert_eq!(path_dacl_sddl(&paths.config).unwrap(), config_acl);
 
         set_rules_edit_access_with_owner(&paths, true, None).unwrap();
         fs::remove_dir_all(program_data).unwrap();
