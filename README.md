@@ -99,14 +99,14 @@ The application does not change adapter DNS settings or the original DNS destina
 Validate a configuration without enabling capture:
 
 ```powershell
-cargo run -- --config .\dns-shunt.example.toml
+cargo run --bin dns-shunt -- --config .\dns-shunt.example.toml
 ```
 
 Install the WinDivert runtime assets once, then run the default backend:
 
 ```powershell
 .\scripts\install-windivert.ps1
-cargo run -- --config .\dns-shunt.example.toml --run
+cargo run --bin dns-shunt -- --config .\dns-shunt.example.toml --run
 ```
 
 With `--run`, the unauthenticated dashboard is available at
@@ -202,7 +202,7 @@ Install WinDivert's signed x64 runtime assets with the setup script, then run:
 
 ```powershell
 .\scripts\install-windivert.ps1
-cargo run -- --config .\dns-shunt.example.toml --run
+cargo run --bin dns-shunt -- --config .\dns-shunt.example.toml --run
 ```
 
 The WinDivert setup script validates the downloaded archive size and driver signature before staging its runtime files.
