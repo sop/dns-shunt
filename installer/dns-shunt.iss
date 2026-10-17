@@ -10,6 +10,7 @@
 AppId={{7E394261-C5B4-44F3-9E7D-AD9857D64115}
 AppName={#AppName}
 AppVersion={#AppVersion}
+UninstallDisplayName={#AppName}
 AppPublisher={#AppPublisher}
 DefaultDirName={autopf}\DNS Shunt
 DefaultGroupName=DNS Shunt
