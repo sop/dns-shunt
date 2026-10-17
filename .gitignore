@@ -1,6 +1,7 @@
 # Cargo build output
 /target/
 /dist/
+/build/
 
 # Rust compiler backup files
 **/*.rs.bk
