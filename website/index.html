@@ -1,0 +1,181 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="theme-color" id="theme-color" content="#f4f6ef">
+    <meta
+      name="description"
+      content="DNS Shunt is a Windows utility for managing local DNS overrides."
+    >
+    <link rel="icon" type="image/png" href="assets/dns-shunt.png">
+    <link rel="stylesheet" href="styles.css">
+    <title>DNS Shunt | Local DNS overrides for Windows</title>
+    <script>
+      const themePreference = window.matchMedia(
+        '(prefers-color-scheme: dark)'
+      );
+      let manualTheme = null;
+      try {
+        const savedTheme = localStorage.getItem('dns-shunt-theme');
+        if (savedTheme === 'light' || savedTheme === 'dark') {
+          manualTheme = savedTheme;
+        }
+      } catch {}
+      document.documentElement.dataset.theme = manualTheme ||
+        (themePreference.matches ? 'dark' : 'light');
+    </script>
+  </head>
+  <body>
+    <div class="shell">
+      <header class="topbar">
+        <a class="brand" href="#top" aria-label="DNS Shunt home">
+          <img src="assets/dns-shunt.png" alt="">
+          <span>DNS <strong>Shunt</strong></span>
+        </a>
+        <div class="top-actions">
+          <button class="theme-toggle" id="theme-toggle" type="button"
+            aria-label="Switch to dark mode" title="Switch to dark mode">
+            <svg class="theme-icon-dark" viewBox="0 0 24 24"
+              aria-hidden="true">
+              <circle cx="12" cy="12" r="4"></circle>
+              <path d="M12 2v2m0 16v2M4.93 4.93l1.42 1.42m11.3 11.3
+                1.42 1.42M2 12h2m16 0h2M4.93 19.07l1.42-1.42
+                m11.3-11.3 1.42-1.42"></path>
+            </svg>
+            <svg class="theme-icon-light" viewBox="0 0 24 24"
+              aria-hidden="true">
+              <path d="M20.9 13A9 9 0 0 1 11 3.1 9 9 0 1 0 20.9 13Z">
+              </path>
+            </svg>
+          </button>
+          <a class="top-link" href="https://github.com/sop/dns-shunt">
+            View source <span aria-hidden="true">&nearr;</span>
+          </a>
+        </div>
+      </header>
+
+      <main id="top">
+        <section class="hero" aria-labelledby="hero-title">
+          <div class="hero-copy">
+            <p class="eyebrow"><span></span> A local Windows utility</p>
+            <h1 id="hero-title">
+              Precise DNS overrides. <em>No resolver changes.</em>
+            </h1>
+            <p class="intro">
+              DNS Shunt lets you direct selected domain names to chosen IP
+              addresses, right on your Windows computer. The rest of your DNS
+              traffic carries on as usual.
+            </p>
+            <div class="hero-actions">
+              <a
+                class="button"
+                href="https://github.com/sop/dns-shunt/releases"
+              >
+                Get the latest release <span aria-hidden="true">&nearr;</span>
+              </a>
+              <span class="platform">Windows 10/11 <i></i> x64</span>
+            </div>
+          </div>
+          <aside class="hero-note" aria-label="How DNS Shunt behaves">
+            <div class="note-head">
+              <span class="signal" aria-hidden="true"></span>
+              <span>One rule, one detour</span>
+            </div>
+            <div class="route">
+              <span class="route-label">MATCHING NAME</span>
+              <strong>dev.example.test</strong>
+              <span class="route-line" aria-hidden="true"></span>
+              <span class="route-target"><b>&rarr;</b> chosen IP address</span>
+            </div>
+            <div class="route route-pass">
+              <span class="route-label">EVERYTHING ELSE</span>
+              <strong>Other DNS requests</strong>
+              <span class="route-line" aria-hidden="true"></span>
+              <span class="route-target">
+                <b>&rarr;</b> Windows-selected resolver
+              </span>
+            </div>
+            <p class="note-foot">
+              No adapter DNS changes. No resolver selection.
+            </p>
+          </aside>
+        </section>
+
+        <section class="details" aria-label="Product details">
+          <article class="detail-card">
+            <span class="index">01 / MATCH</span>
+            <h2>Overrides, on your terms.</h2>
+            <p>
+              Add an exact domain or a wildcard for its subdomains, then set
+              the IP address it should resolve to. Only matching A/IN queries
+              for IPv4 addresses receive a synthesized answer.
+            </p>
+          </article>
+          <article class="detail-card">
+            <span class="index">02 / PASS THROUGH</span>
+            <h2>Your DNS stays yours.</h2>
+            <p>
+              Unmatched and unsupported requests pass through unchanged.
+              Windows continues to choose the resolver; DNS Shunt does not
+              change adapter settings or configure a resolver.
+            </p>
+          </article>
+          <article class="detail-card">
+            <span class="index">03 / RUN</span>
+            <h2>Enabled when you decide.</h2>
+            <p>
+              Manual packet capture is opt-in. Install the Windows service
+              explicitly to use service mode. Capture is limited to outbound,
+              non-loopback IPv4 DNS over UDP port 53.
+            </p>
+          </article>
+        </section>
+
+        <footer class="footer">
+          <span>
+            DNS Shunt <span class="footer-dot">/</span>
+            Local DNS overrides for Windows
+          </span>
+          <nav aria-label="Project links">
+            <a href="https://github.com/sop/dns-shunt">Repository</a>
+            <a href="https://github.com/sop/dns-shunt/blob/master/docs/technical-details.md">
+              Technical guide
+            </a>
+            <a href="https://github.com/sop/dns-shunt/releases">Releases</a>
+          </nav>
+        </footer>
+      </main>
+    </div>
+    <script>
+      const themeToggle = document.getElementById('theme-toggle');
+      const themeColor = document.getElementById('theme-color');
+
+      function applyTheme(theme) {
+        document.documentElement.dataset.theme = theme;
+        themeColor.content = theme === 'dark' ? '#101514' : '#f4f6ef';
+        const target = theme === 'dark' ? 'light' : 'dark';
+        themeToggle.setAttribute('aria-label', 'Switch to ' + target + ' mode');
+        themeToggle.title = 'Switch to ' + target + ' mode';
+      }
+
+      applyTheme(document.documentElement.dataset.theme);
+
+      themeToggle.addEventListener('click', () => {
+        manualTheme = document.documentElement.dataset.theme === 'dark'
+          ? 'light'
+          : 'dark';
+        applyTheme(manualTheme);
+        try {
+          localStorage.setItem('dns-shunt-theme', manualTheme);
+        } catch {}
+      });
+
+      themePreference.addEventListener('change', event => {
+        if (manualTheme === null) {
+          applyTheme(event.matches ? 'dark' : 'light');
+        }
+      });
+    </script>
+  </body>
+</html>
