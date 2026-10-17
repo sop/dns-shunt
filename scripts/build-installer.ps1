@@ -13,6 +13,7 @@ $stageDirectory = Join-Path $distDirectory "stage"
 $archivePath = Join-Path $cacheDirectory $archiveName
 $installerDefinition = Join-Path $projectRoot "installer\dns-shunt.iss"
 $releaseExecutable = Join-Path $projectRoot "target\$target\release\dns-shunt.exe"
+$releaseTrayExecutable = Join-Path $projectRoot "target\$target\release\dns-shunt-tray.exe"
 
 function Stop-WithError {
     param([Parameter(Mandatory = $true)][string]$Message)
@@ -147,9 +148,13 @@ if ($LASTEXITCODE -ne 0) {
 if (-not (Test-Path -LiteralPath $releaseExecutable -PathType Leaf)) {
     Stop-WithError "release executable is missing: $releaseExecutable"
 }
+if (-not (Test-Path -LiteralPath $releaseTrayExecutable -PathType Leaf)) {
+    Stop-WithError "tray executable is missing: $releaseTrayExecutable"
+}
 
 New-Item -ItemType Directory -Path $stageDirectory -Force | Out-Null
 Copy-Item -LiteralPath $releaseExecutable -Destination $stageDirectory
+Copy-Item -LiteralPath $releaseTrayExecutable -Destination $stageDirectory
 Copy-Item -LiteralPath (Join-Path $projectRoot "dns-shunt.example.toml") `
     -Destination $stageDirectory
 
@@ -182,6 +187,7 @@ if ($signature.Status -ne [System.Management.Automation.SignatureStatus]::Valid)
 }
 foreach ($asset in @(
     "dns-shunt.exe",
+    "dns-shunt-tray.exe",
     "dns-shunt.example.toml",
     "WinDivert.dll",
     "WinDivert64.sys"

@@ -757,8 +757,11 @@ mod tests {
     use std::{
         env,
         path::PathBuf,
+        sync::atomic::{AtomicU64, Ordering},
         time::{SystemTime, UNIX_EPOCH},
     };
+
+    static TEST_PATH_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
     fn runtime() -> Arc<RuntimeState> {
         let config = Config::parse("upstream=\"1.1.1.1\"\nsource_port=53053\n").unwrap();
@@ -767,7 +770,10 @@ mod tests {
             .unwrap()
             .as_nanos();
         let path: PathBuf = env::temp_dir()
-            .join(format!("dns-shunt-api-{nonce}"))
+            .join(format!(
+                "dns-shunt-api-{nonce}-{}",
+                TEST_PATH_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+            ))
             .join("rules.json");
         RuntimeState::new(
             config.clone(),

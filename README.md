@@ -8,7 +8,8 @@ WinDivert inspects only outbound, non-loopback IPv4 UDP DNS packets to port 53. 
 
 - Rust stable with the MSVC toolchain for native Windows builds.
 - Windows 10/11 x64 to run packet interception.
-- Administrator privileges to start interception.
+- Administrator privileges for manual foreground capture and service
+  installation. Installed service control is available to local users.
 - The signed WinDivert runtime assets installed by
   `scripts/install-windivert.ps1` for
   manual foreground capture.
@@ -64,7 +65,8 @@ that installation enables machine-wide DNS capture and asks for explicit
 consent. It does not change adapter DNS settings or resolver selection. The
 target computer does not need PowerShell. Uninstall stops and removes the
 service and installer-owned files while preserving
-`%ProgramData%\dns-shunt\config.toml` and `rules.json`.
+`%ProgramData%\dns-shunt\config.toml` and
+`%ProgramData%\dns-shunt\rules\rules.json`.
 
 The Windows release executable is `target\release\dns-shunt.exe`. Run it directly to validate a configuration or start capture:
 
@@ -120,7 +122,7 @@ interception. A port conflict prevents capture from starting.
 
 Foreground user rules are stored as human-readable JSON in
 `%APPDATA%\dns-shunt\rules.json` on Windows. The service instead uses the
-shared `%ProgramData%\dns-shunt\rules.json` and
+shared `%ProgramData%\dns-shunt\rules\rules.json` and
 `%ProgramData%\dns-shunt\config.toml` files. The browser can add, edit, and
 delete rules immediately. Exact names win; otherwise, the most-specific
 matching wildcard wins. Wildcards match subdomains but not their apex. Only
@@ -138,20 +140,33 @@ settings.
 
 The service runs one machine-wide capture process as `LocalSystem`; it starts
 at boot without a user session. Installing it through the Inno Setup package is
-the administrator's explicit opt-in. The native service-management commands
-are also available for administrative repair or automation:
+the administrator's explicit opt-in. The notification-area tray starts for
+each interactive user at logon and is launched after setup for the installing
+user. It shows shared service state and provides start/stop, GUI, and rules-file
+actions. Local users can start, stop, and query the installed service without
+elevation. Install, update, uninstall,
+and crash-recovery operations remain administrator-only. Native commands are
+also available for automation:
 
 ```powershell
 .\target\release\dns-shunt.exe --install-service
+.\target\release\dns-shunt.exe --start-service
 .\target\release\dns-shunt.exe --stop-service
 .\target\release\dns-shunt.exe --uninstall-service
 ```
 
-Each command requires an elevated administrator. Installation creates
-`%ProgramData%\dns-shunt`, sets access for SYSTEM and Administrators, seeds
-`config.toml` only when absent, validates it, registers the `Dns-Shunt` Event
-Log source, and creates or updates and starts the automatic service. The
-installer package stages the executable, signed WinDivert runtime, and example
+Installation and uninstallation require an elevated administrator. Start and
+stop use SCM authorization and are available to local users. Installation
+creates `%ProgramData%\dns-shunt`, keeps the directory protected, grants local
+users read-only access to `config.toml`, seeds it only when absent, validates
+it, registers the `Dns-Shunt` Event Log source, and creates or updates and
+starts the automatic service. The shared rules file is under
+`%ProgramData%\dns-shunt\rules\rules.json`; local users can edit it only while
+the service is stopped. The service revokes that access before loading rules
+and restores it after shutdown or a handled startup failure. The tray disables
+Open Rules File while running and disables Open GUI while stopped. Starting
+the service prompts users to close any rules editor first. The installer
+stages both executables, the signed WinDivert runtime, and example
 configuration under `%ProgramFiles%\DNS Shunt`. Check status and startup
 diagnostics with:
 
@@ -161,10 +176,13 @@ Get-WinEvent -FilterHashtable @{ LogName = 'Application'; ProviderName = 'Dns-Sh
 ```
 
 The dashboard remains unauthenticated and loopback-only as described above.
-Any local user or process can view status/rules or make changes; service-mode
-rule changes affect all users on the computer because the TOML and JSON rule
-files are shared under `%ProgramData%`. The service does not modify adapter
-DNS settings or Windows resolver selection.
+Any local user or process can view the loopback dashboard and change its rules
+while the service is running. Service-mode rule changes affect every account
+on the computer because the rules file is shared under `%ProgramData%`. Users
+can also edit the shared JSON file directly while the service is stopped; those
+changes load on the next start. The tray opens the configured GUI hostname and
+port from `config.toml`. The service does not modify adapter DNS settings or
+Windows resolver selection.
 
 Stop the service through SCM or the native command, or remove it through
 Windows Apps > Installed apps:
@@ -177,7 +195,8 @@ Uninstall stops/deletes the service and removes its installed binaries and
 Event Log registration. It preserves `%ProgramData%\dns-shunt` configuration
 and rules. Confirm ordinary DNS resumes after stopping the service.
 
-Run commands from an elevated terminal. `--help` prints the available options and prerequisites.
+Run install/uninstall commands from an elevated terminal. `--help` prints the
+available options and prerequisites.
 
 ## WinDivert
 

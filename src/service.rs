@@ -15,8 +15,16 @@ use windows_sys::Win32::{
         ERROR_SERVICE_DOES_NOT_EXIST, ERROR_SERVICE_NOT_ACTIVE, ERROR_SERVICE_SPECIFIC_ERROR,
         LocalFree,
     },
-    Security::Authorization::ConvertStringSecurityDescriptorToSecurityDescriptorW,
-    Security::{DACL_SECURITY_INFORMATION, PROTECTED_DACL_SECURITY_INFORMATION, SetFileSecurityW},
+    Security::Authorization::{
+        BuildTrusteeWithSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW,
+        ConvertStringSidToSidW, GetNamedSecurityInfoW, SE_FILE_OBJECT, SE_SERVICE,
+        SetEntriesInAclW, SetSecurityInfo,
+    },
+    Security::{
+        DACL_SECURITY_INFORMATION, EqualSid, GetSecurityDescriptorOwner,
+        OWNER_SECURITY_INFORMATION, PROTECTED_DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR,
+        PSID, SetFileSecurityW,
+    },
     System::{
         EventLog::{
             DeregisterEventSource, EVENTLOG_ERROR_TYPE, EVENTLOG_INFORMATION_TYPE,
@@ -69,44 +77,36 @@ const EVENT_SOURCE: &[u16] = &[
 const EVENT_SOURCE_KEY: &str =
     "SYSTEM\\CurrentControlSet\\Services\\EventLog\\Application\\Dns-Shunt";
 const PROGRAM_DATA_SDDL: &str = "D:P(A;OICI;FA;;;SY)(A;OICI;0x1301bf;;;BA)";
+const CONFIG_SDDL: &str = "D:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;0x120089;;;BU)";
+const RULES_LOCKED_SDDL: &str = "D:P(A;OICI;FA;;;SY)(A;OICI;0x1301bf;;;BA)";
+const RULES_EDITABLE_SDDL: &str = "D:P(A;OICI;FA;;;SY)(A;OICI;0x1301bf;;;BA)(A;OICI;0x1301bf;;;BU)";
 const DELETE_ACCESS: u32 = 0x0001_0000;
+const WRITE_DAC_ACCESS: u32 = 0x0004_0000;
+const READ_CONTROL_ACCESS: u32 = 0x0002_0000;
+const SERVICE_CONTROL_RIGHTS: u32 = SERVICE_QUERY_STATUS | SERVICE_START | SERVICE_STOP;
 
 static STATUS_HANDLE: AtomicIsize = AtomicIsize::new(0);
 static CURRENT_STATE: AtomicU32 = AtomicU32::new(SERVICE_START_PENDING);
 static STOP_REQUESTED: AtomicBool = AtomicBool::new(false);
 static RUNTIME: OnceLock<Mutex<Option<Arc<RuntimeState>>>> = OnceLock::new();
 
-pub struct ServicePaths {
-    pub config: PathBuf,
-    pub rules: PathBuf,
-}
-
-pub fn paths_under(program_data: &Path) -> ServicePaths {
-    let root = program_data.join("dns-shunt");
-    ServicePaths {
-        config: root.join("config.toml"),
-        rules: root.join("rules.json"),
-    }
-}
+pub use crate::service_paths::ServicePaths;
 
 pub fn service_paths() -> Result<ServicePaths, std::io::Error> {
-    let root = std::env::var_os("PROGRAMDATA")
-        .map(PathBuf::from)
-        .ok_or_else(|| {
-            std::io::Error::new(
-                std::io::ErrorKind::NotFound,
-                "could not locate the ProgramData directory",
-            )
-        })?;
-    Ok(paths_under(&root))
+    crate::service_paths::service_paths()
 }
 
 pub fn manage(command: crate::ServiceCommand) -> Result<(), Box<dyn Error>> {
-    if unsafe { IsUserAnAdmin() } == 0 {
+    if matches!(
+        command,
+        crate::ServiceCommand::Install | crate::ServiceCommand::Uninstall
+    ) && unsafe { IsUserAnAdmin() } == 0
+    {
         return Err("service management requires an elevated administrator".into());
     }
 
     match command {
+        crate::ServiceCommand::Start => start_installed_service(),
         crate::ServiceCommand::Stop => stop_installed_service(),
         crate::ServiceCommand::Install => install_or_update_service(),
         crate::ServiceCommand::Uninstall => uninstall_service(),
@@ -125,7 +125,12 @@ fn install_or_update_service() -> Result<(), Box<dyn Error>> {
     let manager = open_manager(SC_MANAGER_CONNECT | SC_MANAGER_CREATE_SERVICE)?;
     let service = match open_service(
         &manager,
-        SERVICE_CHANGE_CONFIG | SERVICE_QUERY_STATUS | SERVICE_START | SERVICE_STOP,
+        SERVICE_CHANGE_CONFIG
+            | SERVICE_QUERY_STATUS
+            | SERVICE_START
+            | SERVICE_STOP
+            | READ_CONTROL_ACCESS
+            | WRITE_DAC_ACCESS,
     ) {
         Ok(service) => {
             stop_handle(&service)?;
@@ -156,7 +161,12 @@ fn install_or_update_service() -> Result<(), Box<dyn Error>> {
                     manager.0,
                     service_name.as_ptr(),
                     display_name.as_ptr(),
-                    SERVICE_CHANGE_CONFIG | SERVICE_QUERY_STATUS | SERVICE_START | SERVICE_STOP,
+                    SERVICE_CHANGE_CONFIG
+                        | SERVICE_QUERY_STATUS
+                        | SERVICE_START
+                        | SERVICE_STOP
+                        | READ_CONTROL_ACCESS
+                        | WRITE_DAC_ACCESS,
                     SERVICE_WIN32_OWN_PROCESS,
                     SERVICE_AUTO_START,
                     SERVICE_ERROR_NORMAL,
@@ -176,6 +186,8 @@ fn install_or_update_service() -> Result<(), Box<dyn Error>> {
         Err(error) => return Err(error.into()),
     };
 
+    grant_service_control_to_users(&service)?;
+
     let started = unsafe { StartServiceW(service.0, 0, ptr::null()) };
     if started == 0 {
         let error = std::io::Error::last_os_error();
@@ -185,6 +197,19 @@ fn install_or_update_service() -> Result<(), Box<dyn Error>> {
     }
     wait_for_service_state(&service, SERVICE_RUNNING, "DnsShunt")?;
     Ok(())
+}
+
+fn start_installed_service() -> Result<(), Box<dyn Error>> {
+    let manager = open_manager(SC_MANAGER_CONNECT)?;
+    let service = open_service(&manager, SERVICE_QUERY_STATUS | SERVICE_START)?;
+    let started = unsafe { StartServiceW(service.0, 0, ptr::null()) };
+    if started == 0 {
+        let error = std::io::Error::last_os_error();
+        if error.raw_os_error() != Some(ERROR_SERVICE_ALREADY_RUNNING as i32) {
+            return Err(format!("could not start the DnsShunt service: {error}").into());
+        }
+    }
+    wait_for_service_state(&service, SERVICE_RUNNING, "DnsShunt")
 }
 
 fn stop_installed_service() -> Result<(), Box<dyn Error>> {
@@ -406,35 +431,7 @@ fn prepare_service_data() -> Result<(), Box<dyn Error>> {
     let data_dir = paths.config.parent().ok_or("invalid ProgramData path")?;
     fs::create_dir_all(data_dir)?;
 
-    let descriptor_text = wide(PROGRAM_DATA_SDDL);
-    let mut descriptor = ptr::null_mut();
-    if unsafe {
-        ConvertStringSecurityDescriptorToSecurityDescriptorW(
-            descriptor_text.as_ptr(),
-            1,
-            &mut descriptor,
-            ptr::null_mut(),
-        )
-    } == 0
-    {
-        return Err(last_error("could not prepare ProgramData permissions"));
-    }
-    let directory = wide(&data_dir.to_string_lossy());
-    let secured = unsafe {
-        SetFileSecurityW(
-            directory.as_ptr(),
-            DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
-            descriptor,
-        )
-    };
-    unsafe {
-        let _ = LocalFree(descriptor);
-    }
-    if secured == 0 {
-        return Err(last_error(
-            "could not grant SYSTEM and Administrators access to ProgramData",
-        ));
-    }
+    set_path_security_owned(data_dir, PROGRAM_DATA_SDDL, "BA")?;
 
     let bundled_config = std::env::current_exe()?
         .parent()
@@ -453,6 +450,7 @@ fn prepare_service_data() -> Result<(), Box<dyn Error>> {
         Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
         Err(error) => return Err(error.into()),
     }
+    set_path_security_owned(&paths.config, CONFIG_SDDL, "BA")?;
     crate::config::Config::load(&paths.config).map_err(|error| -> Box<dyn Error> {
         format!(
             "service configuration is invalid at {}: {error}",
@@ -460,7 +458,270 @@ fn prepare_service_data() -> Result<(), Box<dyn Error>> {
         )
         .into()
     })?;
+    crate::service_paths::migrate_rules(&paths)?;
+    set_rules_edit_access_with_owner(&paths, true, Some("BA"))?;
     Ok(())
+}
+
+pub(crate) struct RulesAccessGuard {
+    paths: ServicePaths,
+    active: bool,
+}
+
+impl RulesAccessGuard {
+    pub(crate) fn lock(paths: ServicePaths) -> Result<Self, Box<dyn Error>> {
+        set_rules_edit_access(&paths, false)?;
+        Ok(Self {
+            paths,
+            active: true,
+        })
+    }
+
+    pub(crate) fn restore(&mut self) -> Result<(), Box<dyn Error>> {
+        set_rules_edit_access(&self.paths, true)?;
+        self.active = false;
+        Ok(())
+    }
+}
+
+impl Drop for RulesAccessGuard {
+    fn drop(&mut self) {
+        if self.active
+            && let Err(error) = set_rules_edit_access(&self.paths, true)
+        {
+            log_error(&format!("could not restore rules edit access: {error}"));
+        }
+    }
+}
+
+fn set_rules_edit_access(paths: &ServicePaths, editable: bool) -> Result<(), Box<dyn Error>> {
+    set_rules_edit_access_with_owner(paths, editable, Some("SY"))
+}
+
+fn set_rules_edit_access_with_owner(
+    paths: &ServicePaths,
+    editable: bool,
+    owner: Option<&str>,
+) -> Result<(), Box<dyn Error>> {
+    let directory_sddl = if editable {
+        RULES_EDITABLE_SDDL
+    } else {
+        RULES_LOCKED_SDDL
+    };
+    let file_sddl = if editable {
+        "D:P(A;;FA;;;SY)(A;;0x1301bf;;;BA)(A;;0x1301bf;;;BU)"
+    } else {
+        "D:P(A;;FA;;;SY)(A;;0x1301bf;;;BA)"
+    };
+    set_path_security_with_owner(&paths.rules_dir, directory_sddl, owner)?;
+    if paths.rules.exists()
+        && let Err(error) = set_path_security_with_owner(&paths.rules, file_sddl, owner)
+    {
+        if !editable {
+            let _ = set_path_security_with_owner(&paths.rules_dir, RULES_EDITABLE_SDDL, owner);
+        }
+        return Err(error);
+    }
+    Ok(())
+}
+
+fn set_path_security_owned(path: &Path, sddl: &str, owner: &str) -> Result<(), Box<dyn Error>> {
+    set_path_security_with_owner(path, sddl, Some(owner))
+}
+
+fn set_path_security_with_owner(
+    path: &Path,
+    sddl: &str,
+    owner: Option<&str>,
+) -> Result<(), Box<dyn Error>> {
+    let descriptor_text = wide(&match owner {
+        Some(owner) => format!("O:{owner}{sddl}"),
+        None => sddl.to_owned(),
+    });
+    let mut descriptor = ptr::null_mut();
+    if unsafe {
+        ConvertStringSecurityDescriptorToSecurityDescriptorW(
+            descriptor_text.as_ptr(),
+            1,
+            &mut descriptor,
+            ptr::null_mut(),
+        )
+    } == 0
+    {
+        return Err(last_error("could not build the requested file permissions"));
+    }
+    let path_wide = wide(&path.to_string_lossy());
+    let mut security_information = DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION;
+    if owner.is_some() {
+        let mut current_owner = ptr::null_mut();
+        let mut current_descriptor: PSECURITY_DESCRIPTOR = ptr::null_mut();
+        let result = unsafe {
+            GetNamedSecurityInfoW(
+                path_wide.as_ptr(),
+                SE_FILE_OBJECT,
+                OWNER_SECURITY_INFORMATION,
+                &mut current_owner,
+                ptr::null_mut(),
+                ptr::null_mut(),
+                ptr::null_mut(),
+                &mut current_descriptor,
+            )
+        };
+        if result != 0 {
+            unsafe {
+                let _ = LocalFree(descriptor);
+            }
+            return Err(std::io::Error::from_raw_os_error(result as i32).into());
+        }
+
+        let mut requested_owner = ptr::null_mut();
+        let mut owner_defaulted = 0;
+        let owner_read = unsafe {
+            GetSecurityDescriptorOwner(descriptor, &mut requested_owner, &mut owner_defaulted)
+        };
+        if owner_read == 0 || requested_owner.is_null() || current_owner.is_null() {
+            unsafe {
+                let _ = LocalFree(current_descriptor);
+                let _ = LocalFree(descriptor);
+            }
+            return Err(last_error("could not read the requested or current owner"));
+        }
+
+        let owner_matches = unsafe { EqualSid(current_owner, requested_owner) } != 0;
+        unsafe {
+            let _ = LocalFree(current_descriptor);
+        }
+        if !owner_matches {
+            security_information |= OWNER_SECURITY_INFORMATION;
+        }
+    }
+    let secured = unsafe { SetFileSecurityW(path_wide.as_ptr(), security_information, descriptor) };
+    unsafe {
+        let _ = LocalFree(descriptor);
+    }
+    if secured == 0 {
+        return Err(format!(
+            "could not set permissions on {}: {}",
+            path.display(),
+            std::io::Error::last_os_error()
+        )
+        .into());
+    }
+    Ok(())
+}
+
+fn grant_service_control_to_users(service: &ServiceHandle) -> Result<(), Box<dyn Error>> {
+    let mut old_acl = ptr::null_mut();
+    let mut security_descriptor: PSECURITY_DESCRIPTOR = ptr::null_mut();
+    let result = unsafe {
+        windows_sys::Win32::Security::Authorization::GetSecurityInfo(
+            service.0,
+            SE_SERVICE,
+            DACL_SECURITY_INFORMATION,
+            ptr::null_mut(),
+            ptr::null_mut(),
+            &mut old_acl,
+            ptr::null_mut(),
+            &mut security_descriptor,
+        )
+    };
+    if result != 0 {
+        return Err(std::io::Error::from_raw_os_error(result as i32).into());
+    }
+
+    let users_sid_text = wide("S-1-5-32-545");
+    let mut users_sid: PSID = ptr::null_mut();
+    if unsafe { ConvertStringSidToSidW(users_sid_text.as_ptr(), &mut users_sid) } == 0 {
+        unsafe {
+            let _ = LocalFree(security_descriptor);
+        }
+        return Err(last_error("could not resolve the built-in Users SID"));
+    }
+    let mut entry = windows_sys::Win32::Security::Authorization::EXPLICIT_ACCESS_W::default();
+    unsafe {
+        BuildTrusteeWithSidW(&mut entry.Trustee, users_sid);
+    }
+    entry.grfAccessPermissions = SERVICE_CONTROL_RIGHTS;
+    entry.grfAccessMode = windows_sys::Win32::Security::Authorization::GRANT_ACCESS;
+    let mut new_acl = ptr::null_mut();
+    let result = unsafe { SetEntriesInAclW(1, &entry, old_acl, &mut new_acl) };
+    if result != 0 {
+        unsafe {
+            let _ = LocalFree(users_sid);
+            let _ = LocalFree(security_descriptor);
+        }
+        return Err(std::io::Error::from_raw_os_error(result as i32).into());
+    }
+    let result = unsafe {
+        SetSecurityInfo(
+            service.0,
+            SE_SERVICE,
+            DACL_SECURITY_INFORMATION,
+            ptr::null_mut(),
+            ptr::null_mut(),
+            new_acl,
+            ptr::null_mut(),
+        )
+    };
+    unsafe {
+        let _ = LocalFree(users_sid);
+        let _ = LocalFree(new_acl.cast());
+        let _ = LocalFree(security_descriptor);
+    }
+    if result != 0 {
+        return Err(std::io::Error::from_raw_os_error(result as i32).into());
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+fn security_descriptor_sddl(path: &Path) -> Result<String, Box<dyn Error>> {
+    use windows_sys::Win32::Security::Authorization::{
+        ConvertSecurityDescriptorToStringSecurityDescriptorW, GetNamedSecurityInfoW, SE_FILE_OBJECT,
+    };
+
+    let path = wide(&path.to_string_lossy());
+    let mut descriptor: PSECURITY_DESCRIPTOR = ptr::null_mut();
+    let result = unsafe {
+        GetNamedSecurityInfoW(
+            path.as_ptr(),
+            SE_FILE_OBJECT,
+            DACL_SECURITY_INFORMATION,
+            ptr::null_mut(),
+            ptr::null_mut(),
+            ptr::null_mut(),
+            ptr::null_mut(),
+            &mut descriptor,
+        )
+    };
+    if result != 0 {
+        return Err(std::io::Error::from_raw_os_error(result as i32).into());
+    }
+    let mut text: *mut u16 = ptr::null_mut();
+    let converted = unsafe {
+        ConvertSecurityDescriptorToStringSecurityDescriptorW(
+            descriptor,
+            1,
+            DACL_SECURITY_INFORMATION,
+            &mut text,
+            ptr::null_mut(),
+        )
+    };
+    unsafe {
+        let _ = LocalFree(descriptor);
+    }
+    if converted == 0 {
+        return Err(last_error("could not read the test security descriptor"));
+    }
+    let mut length = 0;
+    unsafe {
+        while *text.add(length) != 0 {
+            length += 1;
+        }
+        let value = String::from_utf16_lossy(std::slice::from_raw_parts(text, length));
+        let _ = LocalFree(text.cast());
+        Ok(value)
+    }
 }
 
 fn verify_runtime_files(executable: &Path) -> Result<(), Box<dyn Error>> {
@@ -739,5 +1000,60 @@ fn report_status(state: u32, exit_code: u32, service_exit_code: u32) {
     };
     unsafe {
         let _ = SetServiceStatus(handle as SERVICE_STATUS_HANDLE, &status);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn rules_acl_toggles_users_modify_without_changing_config_acl() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let program_data = std::env::temp_dir().join(format!(
+            "dns-shunt-service-acl-{}-{nonce}",
+            std::process::id()
+        ));
+        let paths = crate::service_paths::paths_under(&program_data);
+        fs::create_dir_all(&paths.rules_dir).unwrap();
+        fs::write(&paths.config, b"ttl = 60\n").unwrap();
+        fs::write(&paths.rules, b"[]\n").unwrap();
+
+        set_path_security_with_owner(&paths.config, CONFIG_SDDL, None).unwrap();
+        let config_acl = security_descriptor_sddl(&paths.config).unwrap();
+        assert!(config_acl.contains(";;;BU)"));
+        assert!(!config_acl.contains("0x1301bf;;;BU"));
+
+        set_rules_edit_access_with_owner(&paths, true, None).unwrap();
+        assert!(
+            security_descriptor_sddl(&paths.rules_dir)
+                .unwrap()
+                .contains("0x1301bf;;;BU")
+        );
+        assert!(
+            security_descriptor_sddl(&paths.rules)
+                .unwrap()
+                .contains("0x1301bf;;;BU")
+        );
+
+        set_rules_edit_access_with_owner(&paths, false, None).unwrap();
+        assert!(
+            !security_descriptor_sddl(&paths.rules_dir)
+                .unwrap()
+                .contains(";;;BU)")
+        );
+        assert!(
+            !security_descriptor_sddl(&paths.rules)
+                .unwrap()
+                .contains(";;;BU)")
+        );
+        assert_eq!(security_descriptor_sddl(&paths.config).unwrap(), config_acl);
+
+        set_rules_edit_access_with_owner(&paths, true, None).unwrap();
+        fs::remove_dir_all(program_data).unwrap();
     }
 }

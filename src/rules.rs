@@ -40,7 +40,10 @@ impl RuleManager {
     ) -> Result<Self, RuleStoreError> {
         let inputs = match fs::read(&path) {
             Ok(bytes) => serde_json::from_slice::<Vec<RuleInput>>(&bytes)?,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                persist(&path, &[])?;
+                Vec::new()
+            }
             Err(error) => return Err(error.into()),
         };
         let input_order = inputs
@@ -210,7 +213,12 @@ fn replace_file(temp: &Path, destination: &Path) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::time::{SystemTime, UNIX_EPOCH};
+    use std::{
+        sync::atomic::Ordering,
+        time::{SystemTime, UNIX_EPOCH},
+    };
+
+    static TEST_PATH_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
     fn test_path() -> PathBuf {
         let nonce = SystemTime::now()
@@ -218,7 +226,11 @@ mod tests {
             .unwrap()
             .as_nanos();
         std::env::temp_dir()
-            .join(format!("dns-shunt-rules-{}-{nonce}", std::process::id()))
+            .join(format!(
+                "dns-shunt-rules-{}-{nonce}-{}",
+                std::process::id(),
+                TEST_PATH_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+            ))
             .join("rules.json")
     }
 
@@ -235,6 +247,7 @@ mod tests {
         let path = test_path();
         let manager = RuleManager::load(path.clone(), "dns-shunt.local".into(), 60).unwrap();
         assert!(manager.snapshot().is_empty());
+        assert_eq!(fs::read(&path).unwrap(), b"[]\n");
         manager
             .transact(|_| Ok(vec![input("one.example", "192.0.2.1")]))
             .unwrap();

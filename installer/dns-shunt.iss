@@ -2,6 +2,7 @@
 #define AppVersion "0.1.0"
 #define AppPublisher "DNS Shunt"
 #define AppExe "dns-shunt.exe"
+#define TrayExe "dns-shunt-tray.exe"
 #ifndef SourceDir
 #define SourceDir "..\dist\stage"
 #endif
@@ -28,6 +29,7 @@ RestartApplications=no
 
 [Files]
 Source: "{#SourceDir}\{#AppExe}"; DestDir: "{app}"; Flags: ignoreversion notimestamp
+Source: "{#SourceDir}\{#TrayExe}"; DestDir: "{app}"; Flags: ignoreversion notimestamp
 Source: "{#SourceDir}\{#AppExe}"; DestDir: "{tmp}"; Flags: dontcopy notimestamp
 Source: "{#SourceDir}\WinDivert.dll"; DestDir: "{tmp}"; Flags: dontcopy notimestamp
 Source: "{#SourceDir}\WinDivert.dll"; DestDir: "{app}"; Flags: ignoreversion notimestamp
@@ -36,6 +38,9 @@ Source: "{#SourceDir}\dns-shunt.example.toml"; DestDir: "{app}"; Flags: ignoreve
 
 [Icons]
 Name: "{group}\DNS Shunt Dashboard"; Filename: "{sys}\explorer.exe"; Parameters: "http://dns-shunt.local:53080"; IconFilename: "{app}\{#AppExe}"
+
+[Registry]
+Root: HKLM; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: string; ValueName: "DNS Shunt Tray"; ValueData: """{app}\{#TrayExe}"""; Flags: uninsdeletevalue
 
 [Code]
 function InitializeSetup(): Boolean;
@@ -60,6 +65,10 @@ begin
   Result := '';
   ExtractTemporaryFile('{#AppExe}');
   ExtractTemporaryFile('WinDivert.dll');
+  if FileExists(ExpandConstant('{app}\{#TrayExe}')) then
+    ShellExecAsOriginalUser(
+      'open', ExpandConstant('{app}\{#TrayExe}'), '--exit', '', SW_HIDE,
+      ewWaitUntilTerminated, ExitCode);
   if not Exec(
     ExpandConstant('{tmp}\{#AppExe}'),
     '--stop-service', '', SW_HIDE, ewWaitUntilTerminated, ExitCode) then
@@ -85,6 +94,14 @@ begin
       RaiseException(
         'The DNS Shunt service could not be installed and started. ' +
         'Configuration and rules in ProgramData were preserved.');
+    if not ShellExecAsOriginalUser(
+      'open',
+      ExpandConstant('{app}\{#TrayExe}'), '', '', SW_SHOWNORMAL,
+      ewNoWait, ExitCode) then
+      MsgBox(
+        'The service is installed, but the notification-area tray could not ' +
+        'be started. The tray will start the next time a user signs in.',
+        mbError, MB_OK);
   end;
 end;
 
@@ -93,6 +110,10 @@ var
   ExitCode: Integer;
 begin
   Result := False;
+  if FileExists(ExpandConstant('{app}\{#TrayExe}')) then
+    Exec(
+      ExpandConstant('{app}\{#TrayExe}'), '--exit', '', SW_HIDE,
+      ewWaitUntilTerminated, ExitCode);
   if not FileExists(ExpandConstant('{app}\{#AppExe}')) then
   begin
     MsgBox(

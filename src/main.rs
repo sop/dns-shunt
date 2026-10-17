@@ -12,6 +12,7 @@ mod rules;
 
 #[cfg(target_os = "windows")]
 mod service;
+mod service_paths;
 #[cfg(target_os = "windows")]
 mod windivert_backend;
 
@@ -99,6 +100,7 @@ struct Arguments {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ServiceCommand {
+    Start,
     Stop,
     Install,
     Uninstall,
@@ -124,6 +126,10 @@ fn parse_arguments(
             }
             "--run" => enable_capture = true,
             "--service" => service_mode = true,
+            "--start-service" => {
+                service_command = Some(ServiceCommand::Start);
+                service_command_count += 1;
+            }
             "--stop-service" => {
                 service_command = Some(ServiceCommand::Stop);
                 service_command_count += 1;
@@ -177,7 +183,18 @@ fn version_string() -> String {
 fn run_service() -> Result<(), Box<dyn std::error::Error>> {
     let paths = service::service_paths()?;
     let config = config::Config::load(&paths.config)?;
-    run_capture(config, paths.rules, false)
+    let mut rules_access = service::RulesAccessGuard::lock(paths.clone())?;
+    let run_result = run_capture(config, paths.rules, false);
+    let restore_result = rules_access.restore();
+    match (run_result, restore_result) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Err(error), Ok(())) => Err(error),
+        (Ok(()), Err(error)) => Err(error),
+        (Err(run_error), Err(restore_error)) => Err(format!(
+            "{run_error}; additionally failed to restore rules edit access: {restore_error}"
+        )
+        .into()),
+    }
 }
 
 #[cfg(target_os = "windows")]
@@ -218,11 +235,12 @@ fn print_help() {
         "dns-shunt --config <path> [--run]\n",
         "dns-shunt --version\n",
         "dns-shunt --service (Windows Service Control Manager only)\n\n",
-        "dns-shunt --stop-service | --install-service | --uninstall-service\n\n",
+        "dns-shunt --start-service | --stop-service | ",
+        "--install-service | --uninstall-service\n\n",
         "Validate config by default. --run starts the loopback web admin ",
         "and elevated WinDivert capture. Rules are stored in ",
-        "the current user's application-data directory. Service management ",
-        "requires an elevated administrator."
+        "the current user's application-data directory. Install and uninstall ",
+        "require an elevated administrator."
     ));
 }
 
@@ -274,6 +292,12 @@ mod tests {
     #[test]
     fn service_management_commands_are_exclusive() {
         assert_eq!(
+            parse_arguments(["--start-service".to_owned()])
+                .unwrap()
+                .service_command,
+            Some(ServiceCommand::Start)
+        );
+        assert_eq!(
             parse_arguments(["--install-service".to_owned()])
                 .unwrap()
                 .service_command,
@@ -299,22 +323,24 @@ mod tests {
             .is_err()
         );
         assert!(
+            parse_arguments(["--start-service".to_owned(), "--stop-service".to_owned(),]).is_err()
+        );
+        assert!(
             parse_arguments(["--install-service".to_owned(), "--service".to_owned(),]).is_err()
         );
         assert!(parse_arguments(["--install-service".to_owned(), "--run".to_owned(),]).is_err());
     }
 
-    #[cfg(target_os = "windows")]
     #[test]
     fn service_mode_is_exclusive_and_uses_fixed_machine_paths() {
-        let paths = service::paths_under(std::path::Path::new("C:/ProgramData"));
+        let paths = service_paths::paths_under(std::path::Path::new("C:/ProgramData"));
         assert_eq!(
             paths.config,
             PathBuf::from("C:/ProgramData/dns-shunt/config.toml")
         );
         assert_eq!(
             paths.rules,
-            PathBuf::from("C:/ProgramData/dns-shunt/rules.json")
+            PathBuf::from("C:/ProgramData/dns-shunt/rules/rules.json")
         );
     }
 }

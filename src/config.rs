@@ -141,6 +141,11 @@ impl Config {
             gui_port: raw.gui_port,
         })
     }
+
+    #[allow(dead_code)]
+    pub fn gui_url(&self) -> String {
+        format!("http://{}:{}", self.gui_name, self.gui_port)
+    }
 }
 
 #[cfg_attr(not(any(target_os = "windows", test)), allow(dead_code))]
@@ -296,6 +301,12 @@ mod tests {
             .gui_name,
             "admin.example"
         );
+    }
+
+    #[test]
+    fn builds_gui_url_from_the_validated_hostname_and_port() {
+        let config = Config::parse("gui_name = \"Admin.Example.\"\ngui_port = 9090\n").unwrap();
+        assert_eq!(config.gui_url(), "http://admin.example:9090");
     }
 
     #[test]

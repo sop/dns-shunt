@@ -211,10 +211,12 @@ mod tests {
         net::Ipv4Addr,
         sync::{
             Mutex,
-            atomic::{AtomicBool, AtomicUsize, Ordering},
+            atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
         },
         time::{SystemTime, UNIX_EPOCH},
     };
+
+    static TEST_PATH_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
     #[derive(Default)]
     struct MockBackend {
@@ -308,7 +310,10 @@ mod tests {
             .unwrap()
             .as_nanos();
         let path = env::temp_dir()
-            .join(format!("dns-shunt-backend-{nonce}"))
+            .join(format!(
+                "dns-shunt-backend-{nonce}-{}",
+                TEST_PATH_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+            ))
             .join("rules.json");
         let rules = RuleManager::load(path, config.gui_name.clone(), config.ttl).unwrap();
         rules
