@@ -1,10 +1,10 @@
 [package]
 name = "dns-shunt"
-description = "DNS override and interception utility"
+description = "Local DNS override utility"
 version = "0.1.0"
 authors = ["Joni Kollani <joni.kollani@gmail.com>"]
 license = "MIT"
-homepage = "https://github.com/sop/dns-shunt"
+homepage = "https://sop.github.io/dns-shunt/"
 repository = "https://github.com/sop/dns-shunt"
 edition = "2024"
 
