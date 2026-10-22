@@ -341,6 +341,23 @@
         font-size: 12px;
       }
 
+      .notice.expired {
+        position: sticky;
+        top: 8px;
+        z-index: 2;
+        padding: 12px;
+        border: 2px solid var(--orange);
+        border-radius: 4px;
+        background: var(--panel);
+        font-size: 14px;
+        font-weight: 700;
+      }
+
+      .notice.expired button {
+        margin-left: 8px;
+        padding: 6px 10px;
+      }
+
       .foot {
         margin-top: 14px;
         color: var(--muted);
@@ -459,19 +476,22 @@
           </div>
 
           <form id="rule-form">
-            <input name="index" type="hidden">
-            <input name="name" placeholder="host.example or *.example" required>
-            <input name="address" placeholder="IPv4 address" required>
+            <input name="index" type="hidden" disabled>
+            <input name="name" placeholder="host.example or *.example"
+              required disabled>
+            <input name="address" placeholder="IPv4 address" required
+              disabled>
             <input name="ttl" type="number" min="1" max="86400"
+              disabled
               placeholder="TTL">
             <div class="form-actions">
-              <button type="submit">Add rule +</button>
+              <button type="submit" disabled>Add rule +</button>
               <button class="cancel" id="cancel-edit" type="button"
-                hidden>Cancel</button>
+                hidden disabled>Cancel</button>
             </div>
           </form>
 
-          <div class="notice" id="notice"></div>
+          <div class="notice" id="notice" role="alert"></div>
           <div style="overflow-x: auto">
             <table>
               <thead>
@@ -508,6 +528,8 @@
       let uptimeBaseline = 0;
       let uptimeStartedAt = 0;
       let dashboardConnected = false;
+      let csrfToken = null;
+      let csrfExpired = false;
       let guiName = '';
       let guiTtl = 0;
       let guiHits = 0;
@@ -548,24 +570,88 @@
       }
 
       async function api(path, options = {}) {
+        const method = (options.method || 'GET').toUpperCase();
+        const mutating = ['POST', 'PUT', 'DELETE'].includes(method);
+        if (mutating && (!csrfToken || csrfExpired)) {
+          throw Error(
+            'Rule changes are unavailable until the dashboard reconnects.'
+          );
+        }
+
         const response = await fetch(path, {
           ...options,
           headers: {
             'Content-Type': 'application/json',
             ...(options.headers || {}),
+            ...(mutating ? { 'X-CSRF-Token': csrfToken } : {}),
           },
         });
         const body = await response.json();
 
         if (!response.ok) {
+          if (mutating && body.code === 'invalid_csrf_token') {
+            expireCsrfToken();
+          }
           throw Error(body.error || response.statusText);
         }
 
         return body;
       }
 
+      function updateMutationControls() {
+        const enabled = Boolean(csrfToken) && !csrfExpired;
+        document.querySelectorAll(
+          '#rule-form input, #rule-form button, #rules button'
+        ).forEach(control => {
+          control.disabled = !enabled;
+        });
+      }
+
+      function setCsrfToken(token) {
+        if (csrfExpired) return;
+        if (csrfToken !== null && csrfToken !== token) {
+          expireCsrfToken();
+          return;
+        }
+        csrfToken = token;
+        updateMutationControls();
+      }
+
+      async function refreshCsrfToken() {
+        const result = await api('/api/csrf');
+        if (typeof result.token !== 'string' || result.token.length === 0) {
+          throw Error('The service returned an invalid dashboard token.');
+        }
+        setCsrfToken(result.token);
+      }
+
+      function expireCsrfToken() {
+        if (csrfExpired) return;
+        csrfExpired = true;
+        csrfToken = null;
+        updateMutationControls();
+
+        const notice = $('notice');
+        notice.className = 'notice expired';
+        notice.replaceChildren(document.createTextNode(
+          'This dashboard token has expired. Refresh the page to continue managing rules. '
+        ));
+        const refresh = document.createElement('button');
+        refresh.type = 'button';
+        refresh.textContent = 'Refresh page';
+        refresh.addEventListener('click', () => window.location.reload());
+        notice.append(refresh);
+      }
+
+      function setNotice(message) {
+        if (csrfExpired) return;
+        const notice = $('notice');
+        notice.className = 'notice';
+        notice.textContent = message;
+      }
+
       function showError(error) {
-        $('notice').textContent = error.message;
+        setNotice(error.message);
       }
 
       function renderUptime() {
@@ -615,7 +701,7 @@
         }
 
         if (stats.last_error) {
-          $('notice').textContent = 'Last error: ' + stats.last_error;
+          setNotice('Last error: ' + stats.last_error);
         }
       }
 
@@ -640,6 +726,7 @@
           '(GUI hostname)</span></td><td>127.0.0.1</td><td>' + guiTtl +
           's</td><td class="hit" id="gui-hits">' + guiHits +
           '</td><td></td></tr>';
+        updateMutationControls();
       }
 
       async function loadRules() {
@@ -652,11 +739,13 @@
 
       async function loadInitial() {
         try {
-          const [status, rules] = await Promise.all([
+          const [status, rules, csrf] = await Promise.all([
             api('/api/status'),
             api('/api/rules'),
+            api('/api/csrf'),
           ]);
 
+          setCsrfToken(csrf.token);
           dashboardConnected = true;
           $('service').textContent = status.service.toUpperCase();
           uptimeBaseline = status.uptime_seconds;
@@ -686,6 +775,7 @@
       }
 
       $('rules').addEventListener('click', async event => {
+        if (!csrfToken || csrfExpired) return;
         const button = event.target.closest('button');
         if (!button) return;
 
@@ -704,7 +794,7 @@
         } else if (button.classList.contains('delete')) {
           try {
             await api('/api/rules/' + index, { method: 'DELETE' });
-            $('notice').textContent = 'Rule removed';
+            setNotice('Rule removed');
             await loadRules();
           } catch (error) {
             showError(error);
@@ -722,11 +812,12 @@
 
       $('cancel-edit').addEventListener('click', () => {
         resetRuleForm();
-        $('notice').textContent = 'Edit cancelled';
+        setNotice('Edit cancelled');
       });
 
       $('rule-form').addEventListener('submit', async event => {
         event.preventDefault();
+        if (!csrfToken || csrfExpired) return;
 
         const formElement = event.currentTarget;
         const form = new FormData(formElement);
@@ -745,7 +836,7 @@
             ),
           });
           resetRuleForm();
-          $('notice').textContent = 'Rule saved and active';
+          setNotice('Rule saved and active');
           await loadRules();
         } catch (error) {
           showError(error);
@@ -760,6 +851,12 @@
         );
         events.addEventListener('rules-changed', loadRules);
         events.onopen = async () => {
+          try {
+            await refreshCsrfToken();
+          } catch (error) {
+            showError(error);
+          }
+
           try {
             const status = await api('/api/status');
             if (events.readyState !== EventSource.OPEN) return;
@@ -782,6 +879,7 @@
         };
       }
 
+      updateMutationControls();
       start();
       setInterval(renderUptime, 1000);
     </script>

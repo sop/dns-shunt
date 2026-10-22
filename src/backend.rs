@@ -325,7 +325,10 @@ mod tests {
                 }])
             })
             .unwrap();
-        (config.clone(), RuntimeState::new(config, rules, "test"))
+        (
+            config.clone(),
+            RuntimeState::new(config, rules, "test").unwrap(),
+        )
     }
 
     #[test]

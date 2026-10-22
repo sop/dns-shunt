@@ -210,7 +210,7 @@ fn run_capture(
             rules.snapshot().len()
         );
     }
-    let runtime = admin::RuntimeState::new(config.clone(), rules, "WinDivert");
+    let runtime = admin::RuntimeState::new(config.clone(), rules, "WinDivert")?;
     if !console_mode {
         service::attach_runtime(&runtime);
         runtime.set_error_callback(std::sync::Arc::new(service::log_error));

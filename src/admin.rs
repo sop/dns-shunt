@@ -24,6 +24,7 @@ pub struct RuntimeState {
     pub config: Config,
     pub rules: RuleManager,
     pub backend: &'static str,
+    csrf_token: String,
     started: Instant,
     stopping: AtomicBool,
     listener_failed: AtomicBool,
@@ -48,11 +49,26 @@ struct EventState {
 }
 
 impl RuntimeState {
-    pub fn new(config: Config, rules: RuleManager, backend: &'static str) -> Arc<Self> {
-        Arc::new(Self {
+    pub fn new(
+        config: Config,
+        rules: RuleManager,
+        backend: &'static str,
+    ) -> std::io::Result<Arc<Self>> {
+        let mut token_bytes = [0; 32];
+        getrandom::fill(&mut token_bytes).map_err(|error| {
+            std::io::Error::other(format!(
+                "could not generate secure dashboard token: {error}"
+            ))
+        })?;
+        let csrf_token = token_bytes
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect();
+        Ok(Arc::new(Self {
             config,
             rules,
             backend,
+            csrf_token,
             started: Instant::now(),
             stopping: AtomicBool::new(false),
             listener_failed: AtomicBool::new(false),
@@ -68,7 +84,7 @@ impl RuntimeState {
             stats_lock: Mutex::new(()),
             event_state: Mutex::new(EventState::default()),
             event_changed: Condvar::new(),
-        })
+        }))
     }
 
     pub fn is_stopping(&self) -> bool {
@@ -396,11 +412,15 @@ fn handle_connection(mut stream: TcpStream, runtime: &Arc<RuntimeState>) -> Resu
             );
         }
     };
-    if let Err((status, error)) = authorize(&request, runtime) {
+    if let Err((status, error, code)) = authorize(&request, runtime) {
+        let body = match code {
+            Some(code) => json!({"error": error, "code": code}),
+            None => json!({"error": error}),
+        };
         return send_response(
             &mut stream,
             status,
-            &json!({"error": error}).to_string().into_bytes(),
+            &body.to_string().into_bytes(),
             "application/json",
         );
     }
@@ -589,6 +609,7 @@ struct IndexedInput {
 
 fn route(request: &HttpRequest, runtime: &RuntimeState) -> Result<(u16, Value), (u16, String)> {
     match (request.method.as_str(), request.path.as_str()) {
+        ("GET", "/api/csrf") => Ok((200, json!({"token": runtime.csrf_token}))),
         ("GET", "/api/status") => Ok((200, runtime.status())),
         ("GET", "/api/rules") => Ok((200, runtime.rules_json())),
         ("POST", "/api/rules") => {
@@ -683,7 +704,10 @@ fn origin_allowed(origin: &str, runtime: &RuntimeState) -> bool {
         .any(|host| origin.eq_ignore_ascii_case(&format!("http://{host}")))
 }
 
-fn authorize(request: &HttpRequest, runtime: &RuntimeState) -> Result<(), (u16, &'static str)> {
+fn authorize(
+    request: &HttpRequest,
+    runtime: &RuntimeState,
+) -> Result<(), (u16, &'static str, Option<&'static str>)> {
     if !host_allowed(
         request
             .headers
@@ -692,7 +716,7 @@ fn authorize(request: &HttpRequest, runtime: &RuntimeState) -> Result<(), (u16, 
             .unwrap_or(""),
         runtime,
     ) {
-        return Err((403, "invalid Host header"));
+        return Err((403, "invalid Host header", None));
     }
     if matches!(request.method.as_str(), "POST" | "PUT" | "DELETE")
         && !origin_allowed(
@@ -704,7 +728,17 @@ fn authorize(request: &HttpRequest, runtime: &RuntimeState) -> Result<(), (u16, 
             runtime,
         )
     {
-        return Err((403, "invalid or missing Origin"));
+        return Err((403, "invalid or missing Origin", None));
+    }
+    if matches!(request.method.as_str(), "POST" | "PUT" | "DELETE")
+        && request.headers.get("x-csrf-token").map(String::as_str)
+            != Some(runtime.csrf_token.as_str())
+    {
+        return Err((
+            403,
+            "invalid or missing CSRF token",
+            Some("invalid_csrf_token"),
+        ));
     }
     Ok(())
 }
@@ -780,6 +814,39 @@ mod tests {
             RuleManager::load(path, config.gui_name.clone(), config.ttl).unwrap(),
             "WinDivert",
         )
+        .unwrap()
+    }
+
+    #[test]
+    fn csrf_endpoint_returns_the_runtime_token_without_caching() {
+        let state = runtime();
+        let port = state.config.gui_port;
+        let response = connection_response(
+            &state,
+            &format!("GET /api/csrf HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n\r\n"),
+        );
+        let response = String::from_utf8(response).unwrap();
+        assert!(response.starts_with("HTTP/1.1 200 OK\r\n"));
+        assert!(response.contains("Cache-Control: no-store\r\n"));
+        assert!(response.contains("X-Content-Type-Options: nosniff\r\n"));
+        let body = response.split_once("\r\n\r\n").unwrap().1;
+        let token = serde_json::from_str::<Value>(body).unwrap()["token"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        assert_eq!(token.len(), 64);
+        assert!(token.bytes().all(|byte| byte.is_ascii_hexdigit()));
+        assert_eq!(token, state.csrf_token.as_str());
+        let denied = connection_response(
+            &state,
+            &format!("GET /api/csrf HTTP/1.1\r\nHost: evil.example:{port}\r\n\r\n"),
+        );
+        assert!(denied.starts_with(b"HTTP/1.1 403 Forbidden\r\n"));
+    }
+
+    #[test]
+    fn each_runtime_gets_a_fresh_csrf_token() {
+        assert_ne!(runtime().csrf_token, runtime().csrf_token);
     }
 
     fn request(method: &str, path: &str, body: &str) -> HttpRequest {
@@ -850,7 +917,7 @@ mod tests {
     }
 
     #[test]
-    fn unauthenticated_connections_can_read_dashboard_data_and_mutate_rules() {
+    fn loopback_connections_can_read_dashboard_and_mutate_with_csrf_token() {
         let state = runtime();
         state
             .rules
@@ -932,10 +999,12 @@ mod tests {
                     "POST /api/rules HTTP/1.1\r\n",
                     "Host: 127.0.0.1:{}\r\n",
                     "Origin: http://127.0.0.1:{}\r\n",
+                    "X-CSRF-Token: {}\r\n",
                     "Content-Length: {}\r\n\r\n{}"
                 ),
                 port,
                 port,
+                state.csrf_token,
                 body.len(),
                 body
             ),
@@ -996,7 +1065,7 @@ mod tests {
         secured.headers.insert("host".into(), allowed_host.clone());
         assert_eq!(
             authorize(&secured, &runtime),
-            Err((403, "invalid or missing Origin"))
+            Err((403, "invalid or missing Origin", None))
         );
         secured.headers.insert(
             "origin".into(),
@@ -1004,9 +1073,20 @@ mod tests {
         );
         assert_eq!(
             authorize(&secured, &runtime),
-            Err((403, "invalid or missing Origin"))
+            Err((403, "invalid or missing Origin", None))
         );
         secured.headers.insert("origin".into(), allowed_origin);
+        assert_eq!(
+            authorize(&secured, &runtime),
+            Err((
+                403,
+                "invalid or missing CSRF token",
+                Some("invalid_csrf_token")
+            ))
+        );
+        secured
+            .headers
+            .insert("x-csrf-token".into(), runtime.csrf_token.clone());
         assert_eq!(authorize(&secured, &runtime), Ok(()));
         secured.headers.insert(
             "host".into(),
@@ -1014,7 +1094,7 @@ mod tests {
         );
         assert_eq!(
             authorize(&secured, &runtime),
-            Err((403, "invalid Host header"))
+            Err((403, "invalid Host header", None))
         );
         assert!(host_allowed(
             &format!("127.0.0.1:{}", runtime.config.gui_port),
@@ -1089,6 +1169,88 @@ mod tests {
                 .len(),
             0
         );
+    }
+
+    #[test]
+    fn all_rule_mutations_require_the_current_csrf_token() {
+        let state = runtime();
+        let port = state.config.gui_port;
+        let actions = [
+            (
+                "POST",
+                "/api/rules",
+                r#"{"name":"secured.example","address":"192.0.2.1"}"#,
+                201,
+            ),
+            (
+                "PUT",
+                "/api/rules",
+                r#"{"index":0,"name":"secured.example","address":"192.0.2.2"}"#,
+                200,
+            ),
+            ("DELETE", "/api/rules/0", "", 200),
+        ];
+
+        for (method, path, body, success_status) in actions {
+            let before = state.rules_json();
+            for token in [None, Some("wrong-token")] {
+                let token_header = token
+                    .map(|token| format!("X-CSRF-Token: {token}\r\n"))
+                    .unwrap_or_default();
+                let request = format!(
+                    concat!(
+                        "{} {} HTTP/1.1\r\n",
+                        "Host: 127.0.0.1:{}\r\n",
+                        "Origin: http://127.0.0.1:{}\r\n",
+                        "{}",
+                        "Content-Length: {}\r\n\r\n{}"
+                    ),
+                    method,
+                    path,
+                    port,
+                    port,
+                    token_header,
+                    body.len(),
+                    body,
+                );
+                let response = connection_response(&state, &request);
+                assert!(response.starts_with(b"HTTP/1.1 403 Forbidden\r\n"));
+                let body_start = response
+                    .windows(4)
+                    .position(|window| window == b"\r\n\r\n")
+                    .unwrap()
+                    + 4;
+                let response_body = &response[body_start..];
+                let error: Value = serde_json::from_slice(response_body).unwrap();
+                assert_eq!(error["code"], "invalid_csrf_token");
+                assert_eq!(state.rules_json(), before);
+            }
+
+            let request = format!(
+                concat!(
+                    "{} {} HTTP/1.1\r\n",
+                    "Host: 127.0.0.1:{}\r\n",
+                    "Origin: http://127.0.0.1:{}\r\n",
+                    "X-CSRF-Token: {}\r\n",
+                    "Content-Length: {}\r\n\r\n{}"
+                ),
+                method,
+                path,
+                port,
+                port,
+                state.csrf_token,
+                body.len(),
+                body,
+            );
+            let response = connection_response(&state, &request);
+            assert!(
+                response.starts_with(format!("HTTP/1.1 {success_status} ").as_bytes()),
+                "unexpected response: {}",
+                String::from_utf8_lossy(&response)
+            );
+        }
+
+        assert!(state.rules_json().as_array().unwrap().is_empty());
     }
 
     #[test]
