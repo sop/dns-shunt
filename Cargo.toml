@@ -13,11 +13,11 @@ name = "interception"
 harness = false
 
 [dependencies]
-getrandom = "0.3"
+getrandom = "0.4"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
-toml = "0.8"
+toml = "1.1"
 
 [build-dependencies]
 chrono = "0.4"
@@ -25,9 +25,9 @@ winres = "0.1"
 
 [target.'cfg(target_os = "windows")'.dependencies]
 ctrlc = "3"
-windows = { version = "0.48", features = ["Win32_Foundation"] }
-windivert = { version = "=0.6.0", features = ["vendored"] }
-windivert-sys = { version = "=0.10.0", features = ["vendored"] }
+windows = { version = "0.62", features = ["Win32_Foundation"] }
+windivert = { version = "=0.7.0-beta.4", features = ["vendored"] }
+windivert-sys = { version = "=0.11.0-beta.2", features = ["vendored"] }
 windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
     "Win32_Graphics_Gdi",
