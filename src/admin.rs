@@ -452,10 +452,11 @@ fn handle_connection(mut stream: TcpStream, runtime: &Arc<RuntimeState>) -> Resu
         return send_response(&mut stream, 200, b"", "text/html; charset=utf-8");
     }
     if request.method == "GET" && request.path == "/" {
+        let dashboard = DASHBOARD.replace("{{VERSION}}", env!("CARGO_PKG_VERSION"));
         return send_response(
             &mut stream,
             200,
-            DASHBOARD.as_bytes(),
+            dashboard.as_bytes(),
             "text/html; charset=utf-8",
         );
     }
@@ -944,6 +945,11 @@ mod tests {
             dashboard
                 .windows(b"src=\"/favicon.png\"".len())
                 .any(|window| window == b"src=\"/favicon.png\"")
+        );
+        assert!(
+            dashboard
+                .windows(env!("CARGO_PKG_VERSION").len())
+                .any(|window| window == env!("CARGO_PKG_VERSION").as_bytes())
         );
 
         let favicon = connection_response(
