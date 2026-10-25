@@ -187,8 +187,11 @@ fn replace_file(temp: &Path, destination: &Path) -> std::io::Result<()> {
 #[cfg(target_os = "windows")]
 fn replace_file(temp: &Path, destination: &Path) -> std::io::Result<()> {
     use std::os::windows::ffi::OsStrExt;
-    use windows_sys::Win32::Storage::FileSystem::{
-        MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW,
+    use windows::{
+        Win32::Storage::FileSystem::{
+            MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW,
+        },
+        core::PCWSTR,
     };
     let temp: Vec<u16> = temp.as_os_str().encode_wide().chain(Some(0)).collect();
     let destination: Vec<u16> = destination
@@ -196,18 +199,14 @@ fn replace_file(temp: &Path, destination: &Path) -> std::io::Result<()> {
         .encode_wide()
         .chain(Some(0))
         .collect();
-    let result = unsafe {
+    unsafe {
         MoveFileExW(
-            temp.as_ptr(),
-            destination.as_ptr(),
+            PCWSTR::from_raw(temp.as_ptr()),
+            PCWSTR::from_raw(destination.as_ptr()),
             MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
         )
-    };
-    if result == 0 {
-        Err(std::io::Error::last_os_error())
-    } else {
-        Ok(())
     }
+    .map_err(|error| std::io::Error::from_raw_os_error((error.code().0 as u32 & 0xffff) as i32))
 }
 
 #[cfg(test)]

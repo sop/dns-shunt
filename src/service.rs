@@ -9,46 +9,51 @@ use std::{
     },
 };
 use std::{fs, fs::OpenOptions, io::Write, os::windows::ffi::OsStrExt};
-use windows_sys::Win32::{
-    Foundation::{
-        ERROR_FILE_NOT_FOUND, ERROR_INSUFFICIENT_BUFFER, ERROR_SERVICE_ALREADY_RUNNING,
-        ERROR_SERVICE_DOES_NOT_EXIST, ERROR_SERVICE_NOT_ACTIVE, ERROR_SERVICE_SPECIFIC_ERROR,
-        LocalFree,
-    },
-    Security::Authorization::{
-        BuildTrusteeWithSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW,
-        ConvertStringSidToSidW, GetNamedSecurityInfoW, SE_FILE_OBJECT, SE_SERVICE,
-        SetEntriesInAclW, SetSecurityInfo,
-    },
-    Security::{
-        DACL_SECURITY_INFORMATION, EqualSid, GetSecurityDescriptorOwner,
-        OWNER_SECURITY_INFORMATION, PROTECTED_DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR,
-        PSID, SetFileSecurityW,
-    },
-    System::{
-        EventLog::{
-            DeregisterEventSource, EVENTLOG_ERROR_TYPE, EVENTLOG_INFORMATION_TYPE,
-            RegisterEventSourceW, ReportEventW,
+use windows::{
+    Win32::{
+        Foundation::{
+            ERROR_FILE_NOT_FOUND, ERROR_INSUFFICIENT_BUFFER, ERROR_SERVICE_ALREADY_RUNNING,
+            ERROR_SERVICE_DOES_NOT_EXIST, ERROR_SERVICE_NOT_ACTIVE, ERROR_SERVICE_SPECIFIC_ERROR,
+            HLOCAL, LocalFree,
         },
-        Registry::{
-            HKEY_LOCAL_MACHINE, KEY_SET_VALUE, REG_DWORD, REG_SZ, RegCloseKey, RegCreateKeyExW,
-            RegDeleteTreeW, RegSetValueExW,
+        Security::Authorization::{
+            BuildTrusteeWithSidW, ConvertSecurityDescriptorToStringSecurityDescriptorW,
+            ConvertStringSecurityDescriptorToSecurityDescriptorW, ConvertStringSidToSidW,
+            EXPLICIT_ACCESS_W, GRANT_ACCESS, GetNamedSecurityInfoW, GetSecurityInfo,
+            SE_FILE_OBJECT, SE_SERVICE, SetEntriesInAclW, SetSecurityInfo,
         },
-        Services::{
-            ChangeServiceConfigW, CloseServiceHandle, ControlService, CreateServiceW,
-            DeleteService, OpenSCManagerW, OpenServiceW, QUERY_SERVICE_CONFIGW,
-            QueryServiceConfigW, QueryServiceStatus, RegisterServiceCtrlHandlerExW,
-            SC_MANAGER_CONNECT, SC_MANAGER_CREATE_SERVICE, SERVICE_ACCEPT_SHUTDOWN,
-            SERVICE_ACCEPT_STOP, SERVICE_AUTO_START, SERVICE_CHANGE_CONFIG,
-            SERVICE_CONTROL_INTERROGATE, SERVICE_CONTROL_SHUTDOWN, SERVICE_CONTROL_STOP,
-            SERVICE_ERROR_NORMAL, SERVICE_QUERY_CONFIG, SERVICE_QUERY_STATUS, SERVICE_RUNNING,
-            SERVICE_START, SERVICE_START_PENDING, SERVICE_STATUS, SERVICE_STATUS_HANDLE,
-            SERVICE_STOP, SERVICE_STOP_PENDING, SERVICE_STOPPED, SERVICE_TABLE_ENTRYW,
-            SERVICE_WIN32_OWN_PROCESS, SetServiceStatus, StartServiceCtrlDispatcherW,
-            StartServiceW,
+        Security::{
+            ACL, DACL_SECURITY_INFORMATION, EqualSid, GetSecurityDescriptorOwner,
+            OWNER_SECURITY_INFORMATION, PROTECTED_DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR,
+            PSID, SetFileSecurityW,
         },
+        System::{
+            EventLog::{
+                DeregisterEventSource, EVENTLOG_ERROR_TYPE, EVENTLOG_INFORMATION_TYPE,
+                RegisterEventSourceW, ReportEventW,
+            },
+            Registry::{
+                HKEY, HKEY_LOCAL_MACHINE, KEY_SET_VALUE, REG_DWORD, REG_OPTION_NON_VOLATILE,
+                REG_SZ, REG_VALUE_TYPE, RegCloseKey, RegCreateKeyExW, RegDeleteTreeW,
+                RegSetValueExW,
+            },
+            Services::{
+                ChangeServiceConfigW, CloseServiceHandle, ControlService, CreateServiceW,
+                DeleteService, OpenSCManagerW, OpenServiceW, QUERY_SERVICE_CONFIGW,
+                QueryServiceConfigW, QueryServiceStatus, RegisterServiceCtrlHandlerExW, SC_HANDLE,
+                SC_MANAGER_CONNECT, SC_MANAGER_CREATE_SERVICE, SERVICE_ACCEPT_SHUTDOWN,
+                SERVICE_ACCEPT_STOP, SERVICE_AUTO_START, SERVICE_CHANGE_CONFIG,
+                SERVICE_CONTROL_INTERROGATE, SERVICE_CONTROL_SHUTDOWN, SERVICE_CONTROL_STOP,
+                SERVICE_ERROR_NORMAL, SERVICE_QUERY_CONFIG, SERVICE_QUERY_STATUS, SERVICE_RUNNING,
+                SERVICE_START, SERVICE_START_PENDING, SERVICE_STATUS, SERVICE_STATUS_CURRENT_STATE,
+                SERVICE_STATUS_HANDLE, SERVICE_STOP, SERVICE_STOP_PENDING, SERVICE_STOPPED,
+                SERVICE_TABLE_ENTRYW, SERVICE_WIN32_OWN_PROCESS, SetServiceStatus,
+                StartServiceCtrlDispatcherW, StartServiceW,
+            },
+        },
+        UI::Shell::IsUserAnAdmin,
     },
-    UI::Shell::IsUserAnAdmin,
+    core::{PCWSTR, PWSTR},
 };
 
 const SERVICE_NAME: &[u16] = &[
@@ -86,7 +91,7 @@ const READ_CONTROL_ACCESS: u32 = 0x0002_0000;
 const SERVICE_CONTROL_RIGHTS: u32 = SERVICE_QUERY_STATUS | SERVICE_START | SERVICE_STOP;
 
 static STATUS_HANDLE: AtomicIsize = AtomicIsize::new(0);
-static CURRENT_STATE: AtomicU32 = AtomicU32::new(SERVICE_START_PENDING);
+static CURRENT_STATE: AtomicU32 = AtomicU32::new(SERVICE_START_PENDING.0);
 static STOP_REQUESTED: AtomicBool = AtomicBool::new(false);
 static RUNTIME: OnceLock<Mutex<Option<Arc<RuntimeState>>>> = OnceLock::new();
 
@@ -100,7 +105,7 @@ pub fn manage(command: crate::ServiceCommand) -> Result<(), Box<dyn Error>> {
     if matches!(
         command,
         crate::ServiceCommand::Install | crate::ServiceCommand::Uninstall
-    ) && unsafe { IsUserAnAdmin() } == 0
+    ) && !unsafe { IsUserAnAdmin() }.as_bool()
     {
         return Err("service management requires an elevated administrator".into());
     }
@@ -140,27 +145,27 @@ fn install_or_update_service() -> Result<(), Box<dyn Error>> {
                     SERVICE_WIN32_OWN_PROCESS,
                     SERVICE_AUTO_START,
                     SERVICE_ERROR_NORMAL,
-                    binary_path.as_ptr(),
-                    ptr::null(),
-                    ptr::null_mut(),
-                    ptr::null(),
-                    ptr::null(),
-                    ptr::null(),
-                    display_name.as_ptr(),
+                    PCWSTR::from_raw(binary_path.as_ptr()),
+                    PCWSTR::null(),
+                    None,
+                    PCWSTR::null(),
+                    PCWSTR::null(),
+                    PCWSTR::null(),
+                    PCWSTR::from_raw(display_name.as_ptr()),
                 )
             };
-            if changed == 0 {
-                return Err(last_error("could not update the DnsShunt service"));
-            }
+            changed.map_err(|error| {
+                last_error_with_source("could not update the DnsShunt service", error)
+            })?;
             service
         }
-        Err(error) if error.raw_os_error() == Some(ERROR_SERVICE_DOES_NOT_EXIST as i32) => {
+        Err(error) if win32_error_io(&error) == ERROR_SERVICE_DOES_NOT_EXIST.0 => {
             let service_name = wide("DnsShunt");
             let handle = unsafe {
                 CreateServiceW(
                     manager.0,
-                    service_name.as_ptr(),
-                    display_name.as_ptr(),
+                    PCWSTR::from_raw(service_name.as_ptr()),
+                    PCWSTR::from_raw(display_name.as_ptr()),
                     SERVICE_CHANGE_CONFIG
                         | SERVICE_QUERY_STATUS
                         | SERVICE_START
@@ -170,30 +175,27 @@ fn install_or_update_service() -> Result<(), Box<dyn Error>> {
                     SERVICE_WIN32_OWN_PROCESS,
                     SERVICE_AUTO_START,
                     SERVICE_ERROR_NORMAL,
-                    binary_path.as_ptr(),
-                    ptr::null(),
-                    ptr::null_mut(),
-                    ptr::null(),
-                    ptr::null(),
-                    ptr::null(),
+                    PCWSTR::from_raw(binary_path.as_ptr()),
+                    PCWSTR::null(),
+                    None,
+                    PCWSTR::null(),
+                    PCWSTR::null(),
+                    PCWSTR::null(),
                 )
             };
-            if handle.is_null() {
-                return Err(last_error("could not create the DnsShunt service"));
-            }
-            ServiceHandle(handle)
+            ServiceHandle(handle.map_err(|error| {
+                last_error_with_source("could not create the DnsShunt service", error)
+            })?)
         }
         Err(error) => return Err(error.into()),
     };
 
     grant_service_control_to_users(&service)?;
 
-    let started = unsafe { StartServiceW(service.0, 0, ptr::null()) };
-    if started == 0 {
-        let error = std::io::Error::last_os_error();
-        if error.raw_os_error() != Some(ERROR_SERVICE_ALREADY_RUNNING as i32) {
-            return Err(format!("could not start the DnsShunt service: {error}").into());
-        }
+    if let Err(error) = unsafe { StartServiceW(service.0, None) }
+        && win32_error(&error) != ERROR_SERVICE_ALREADY_RUNNING.0
+    {
+        return Err(format!("could not start the DnsShunt service: {error}").into());
     }
     wait_for_service_state(&service, SERVICE_RUNNING, "DnsShunt")?;
     Ok(())
@@ -202,12 +204,10 @@ fn install_or_update_service() -> Result<(), Box<dyn Error>> {
 fn start_installed_service() -> Result<(), Box<dyn Error>> {
     let manager = open_manager(SC_MANAGER_CONNECT)?;
     let service = open_service(&manager, SERVICE_QUERY_STATUS | SERVICE_START)?;
-    let started = unsafe { StartServiceW(service.0, 0, ptr::null()) };
-    if started == 0 {
-        let error = std::io::Error::last_os_error();
-        if error.raw_os_error() != Some(ERROR_SERVICE_ALREADY_RUNNING as i32) {
-            return Err(format!("could not start the DnsShunt service: {error}").into());
-        }
+    if let Err(error) = unsafe { StartServiceW(service.0, None) }
+        && win32_error(&error) != ERROR_SERVICE_ALREADY_RUNNING.0
+    {
+        return Err(format!("could not start the DnsShunt service: {error}").into());
     }
     wait_for_service_state(&service, SERVICE_RUNNING, "DnsShunt")
 }
@@ -216,7 +216,7 @@ fn stop_installed_service() -> Result<(), Box<dyn Error>> {
     let manager = open_manager(SC_MANAGER_CONNECT)?;
     let service = match open_service(&manager, SERVICE_QUERY_STATUS | SERVICE_STOP) {
         Ok(service) => service,
-        Err(error) if error.raw_os_error() == Some(ERROR_SERVICE_DOES_NOT_EXIST as i32) => {
+        Err(error) if win32_error_io(&error) == ERROR_SERVICE_DOES_NOT_EXIST.0 => {
             return Ok(());
         }
         Err(error) => return Err(error.into()),
@@ -233,11 +233,11 @@ fn uninstall_service() -> Result<(), Box<dyn Error>> {
     ) {
         Ok(service) => {
             stop_handle(&service)?;
-            if unsafe { DeleteService(service.0) } == 0 {
-                return Err(last_error("could not delete the DnsShunt service"));
-            }
+            unsafe { DeleteService(service.0) }.map_err(|error| {
+                last_error_with_source("could not delete the DnsShunt service", error)
+            })?;
         }
-        Err(error) if error.raw_os_error() == Some(ERROR_SERVICE_DOES_NOT_EXIST as i32) => {}
+        Err(error) if win32_error_io(&error) == ERROR_SERVICE_DOES_NOT_EXIST.0 => {}
         Err(error) => return Err(error.into()),
     }
     stop_installed_windivert_driver(&manager)?;
@@ -245,7 +245,7 @@ fn uninstall_service() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-struct ServiceHandle(windows_sys::Win32::System::Services::SC_HANDLE);
+struct ServiceHandle(SC_HANDLE);
 
 impl Drop for ServiceHandle {
     fn drop(&mut self) {
@@ -256,12 +256,9 @@ impl Drop for ServiceHandle {
 }
 
 fn open_manager(access: u32) -> Result<ServiceHandle, std::io::Error> {
-    let handle = unsafe { OpenSCManagerW(ptr::null(), ptr::null(), access) };
-    if handle.is_null() {
-        Err(std::io::Error::last_os_error())
-    } else {
-        Ok(ServiceHandle(handle))
-    }
+    unsafe { OpenSCManagerW(PCWSTR::null(), PCWSTR::null(), access) }
+        .map(ServiceHandle)
+        .map_err(win_error_to_io)
 }
 
 fn open_service(manager: &ServiceHandle, access: u32) -> Result<ServiceHandle, std::io::Error> {
@@ -274,12 +271,9 @@ fn open_named_service(
     access: u32,
 ) -> Result<ServiceHandle, std::io::Error> {
     let name = wide(service_name);
-    let handle = unsafe { OpenServiceW(manager.0, name.as_ptr(), access) };
-    if handle.is_null() {
-        Err(std::io::Error::last_os_error())
-    } else {
-        Ok(ServiceHandle(handle))
-    }
+    unsafe { OpenServiceW(manager.0, PCWSTR::from_raw(name.as_ptr()), access) }
+        .map(ServiceHandle)
+        .map_err(win_error_to_io)
 }
 
 fn stop_handle(service: &ServiceHandle) -> Result<(), Box<dyn Error>> {
@@ -288,39 +282,38 @@ fn stop_handle(service: &ServiceHandle) -> Result<(), Box<dyn Error>> {
 
 fn stop_named_handle(service: &ServiceHandle, service_name: &str) -> Result<(), Box<dyn Error>> {
     let mut status = SERVICE_STATUS::default();
-    if unsafe { QueryServiceStatus(service.0, &mut status) } == 0 {
-        return Err(last_error(&format!(
-            "could not query the {service_name} service state"
-        )));
-    }
+    unsafe { QueryServiceStatus(service.0, &mut status) }.map_err(|error| {
+        last_error_with_source(
+            &format!("could not query the {service_name} service state"),
+            error,
+        )
+    })?;
     if status.dwCurrentState == SERVICE_STOPPED {
         return Ok(());
     }
-    if status.dwCurrentState != SERVICE_STOP_PENDING {
-        let stopped = unsafe { ControlService(service.0, SERVICE_CONTROL_STOP, &mut status) };
-        if stopped == 0 {
-            let error = std::io::Error::last_os_error();
-            if error.raw_os_error() != Some(ERROR_SERVICE_NOT_ACTIVE as i32) {
-                return Err(format!("could not stop the {service_name} service: {error}").into());
-            }
-        }
+    if status.dwCurrentState != SERVICE_STOP_PENDING
+        && let Err(error) = unsafe { ControlService(service.0, SERVICE_CONTROL_STOP, &mut status) }
+        && win32_error(&error) != ERROR_SERVICE_NOT_ACTIVE.0
+    {
+        return Err(format!("could not stop the {service_name} service: {error}").into());
     }
     wait_for_service_state(service, SERVICE_STOPPED, service_name)
 }
 
 fn wait_for_service_state(
     service: &ServiceHandle,
-    expected_state: u32,
+    expected_state: SERVICE_STATUS_CURRENT_STATE,
     service_name: &str,
 ) -> Result<(), Box<dyn Error>> {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
     loop {
         let mut status = SERVICE_STATUS::default();
-        if unsafe { QueryServiceStatus(service.0, &mut status) } == 0 {
-            return Err(last_error(&format!(
-                "could not query the {service_name} service state"
-            )));
-        }
+        unsafe { QueryServiceStatus(service.0, &mut status) }.map_err(|error| {
+            last_error_with_source(
+                &format!("could not query the {service_name} service state"),
+                error,
+            )
+        })?;
         if status.dwCurrentState == expected_state {
             return Ok(());
         }
@@ -331,7 +324,7 @@ fn wait_for_service_state(
                     "timed out waiting for the {} service state ",
                     "{} (current state {})"
                 ),
-                service_name, expected_state, state
+                service_name, expected_state.0, state.0
             )
             .into());
         }
@@ -346,7 +339,7 @@ fn stop_installed_windivert_driver(manager: &ServiceHandle) -> Result<(), Box<dy
         SERVICE_QUERY_CONFIG | SERVICE_QUERY_STATUS | SERVICE_STOP,
     ) {
         Ok(driver) => driver,
-        Err(error) if error.raw_os_error() == Some(ERROR_SERVICE_DOES_NOT_EXIST as i32) => {
+        Err(error) if win32_error_io(&error) == ERROR_SERVICE_DOES_NOT_EXIST.0 => {
             eprintln!("WinDivert driver service is not registered; nothing to stop.");
             return Ok(());
         }
@@ -371,9 +364,9 @@ fn stop_installed_windivert_driver(manager: &ServiceHandle) -> Result<(), Box<dy
     }
 
     let mut status = SERVICE_STATUS::default();
-    if unsafe { QueryServiceStatus(driver.0, &mut status) } == 0 {
-        return Err(last_error("could not query the WinDivert driver state"));
-    }
+    unsafe { QueryServiceStatus(driver.0, &mut status) }.map_err(|error| {
+        last_error_with_source("could not query the WinDivert driver state", error)
+    })?;
     if status.dwCurrentState == SERVICE_STOPPED {
         eprintln!("The installed WinDivert driver is already stopped.");
         return Ok(());
@@ -385,29 +378,31 @@ fn stop_installed_windivert_driver(manager: &ServiceHandle) -> Result<(), Box<dy
 
 fn service_binary_path(service: &ServiceHandle) -> Result<String, Box<dyn Error>> {
     let mut bytes_needed = 0;
-    unsafe {
-        let _ = QueryServiceConfigW(service.0, ptr::null_mut(), 0, &mut bytes_needed);
-    }
-    let error = std::io::Error::last_os_error();
-    if bytes_needed == 0 && error.raw_os_error() != Some(ERROR_INSUFFICIENT_BUFFER as i32) {
-        return Err(error.into());
+    let probe = unsafe { QueryServiceConfigW(service.0, None, 0, &mut bytes_needed) };
+    if bytes_needed == 0
+        && probe
+            .as_ref()
+            .is_err_and(|error| win32_error(error) != ERROR_INSUFFICIENT_BUFFER.0)
+    {
+        return Err(probe.unwrap_err().into());
     }
 
     let word_count = (bytes_needed as usize).div_ceil(std::mem::size_of::<usize>());
     let mut buffer = vec![0usize; word_count];
     let buffer_size = std::mem::size_of_val(buffer.as_slice()) as u32;
     let config = buffer.as_mut_ptr().cast::<QUERY_SERVICE_CONFIGW>();
-    if unsafe { QueryServiceConfigW(service.0, config, buffer_size, &mut bytes_needed) } == 0 {
-        return Err(last_error(
-            "could not query the WinDivert driver image path",
-        ));
-    }
+    // The API fills this aligned buffer and points lpBinaryPathName into it.
+    unsafe { QueryServiceConfigW(service.0, Some(config), buffer_size, &mut bytes_needed) }
+        .map_err(|error| {
+            last_error_with_source("could not query the WinDivert driver image path", error)
+        })?;
 
-    let binary_path = unsafe { (*config).lpBinaryPathName };
+    let binary_path = unsafe { (*config).lpBinaryPathName.0 };
     if binary_path.is_null() {
         return Err("WinDivert driver has no registered image path".into());
     }
     let mut length = 0;
+    // QueryServiceConfigW points into the live buffer above and returns UTF-16.
     unsafe {
         while *binary_path.add(length) != 0 {
             length += 1;
@@ -540,60 +535,56 @@ fn set_path_security_with_owner(
         Some(owner) => format!("O:{owner}{sddl}"),
         None => sddl.to_owned(),
     });
-    let mut descriptor = ptr::null_mut();
-    if unsafe {
+    let mut descriptor = PSECURITY_DESCRIPTOR(ptr::null_mut());
+    if let Err(error) = unsafe {
         ConvertStringSecurityDescriptorToSecurityDescriptorW(
-            descriptor_text.as_ptr(),
+            PCWSTR::from_raw(descriptor_text.as_ptr()),
             1,
             &mut descriptor,
-            ptr::null_mut(),
+            None,
         )
-    } == 0
-    {
-        return Err(last_error("could not build the requested file permissions"));
+    } {
+        return Err(last_error_with_source(
+            "could not build the requested file permissions",
+            error,
+        ));
     }
     let path_wide = wide(&path.to_string_lossy());
     let mut security_information = DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION;
     let mut owner_matches = owner.is_none();
     if owner.is_some() {
-        let mut current_owner = ptr::null_mut();
-        let mut current_descriptor: PSECURITY_DESCRIPTOR = ptr::null_mut();
+        let mut current_owner = PSID(ptr::null_mut());
+        let mut current_descriptor = PSECURITY_DESCRIPTOR(ptr::null_mut());
         let result = unsafe {
             GetNamedSecurityInfoW(
-                path_wide.as_ptr(),
+                PCWSTR::from_raw(path_wide.as_ptr()),
                 SE_FILE_OBJECT,
                 OWNER_SECURITY_INFORMATION,
-                &mut current_owner,
-                ptr::null_mut(),
-                ptr::null_mut(),
-                ptr::null_mut(),
+                Some(&mut current_owner),
+                None,
+                None,
+                None,
                 &mut current_descriptor,
             )
         };
-        if result != 0 {
-            unsafe {
-                let _ = LocalFree(descriptor);
-            }
-            return Err(std::io::Error::from_raw_os_error(result as i32).into());
+        if result.0 != 0 {
+            free_local(descriptor.0);
+            return Err(std::io::Error::from_raw_os_error(result.0 as i32).into());
         }
 
-        let mut requested_owner = ptr::null_mut();
-        let mut owner_defaulted = 0;
+        let mut requested_owner = PSID(ptr::null_mut());
+        let mut owner_defaulted = windows::core::BOOL(0);
         let owner_read = unsafe {
             GetSecurityDescriptorOwner(descriptor, &mut requested_owner, &mut owner_defaulted)
         };
-        if owner_read == 0 || requested_owner.is_null() || current_owner.is_null() {
-            unsafe {
-                let _ = LocalFree(current_descriptor);
-                let _ = LocalFree(descriptor);
-            }
-            return Err(last_error("could not read the requested or current owner"));
+        if owner_read.is_err() || requested_owner.is_invalid() || current_owner.is_invalid() {
+            free_local(current_descriptor.0);
+            free_local(descriptor.0);
+            return Err("could not read the requested or current owner".into());
         }
 
-        owner_matches = unsafe { EqualSid(current_owner, requested_owner) } != 0;
-        unsafe {
-            let _ = LocalFree(current_descriptor);
-        }
+        owner_matches = unsafe { EqualSid(current_owner, requested_owner) }.is_ok();
+        free_local(current_descriptor.0);
         if !owner_matches {
             security_information |= OWNER_SECURITY_INFORMATION;
         }
@@ -601,25 +592,25 @@ fn set_path_security_with_owner(
     if owner_matches {
         match path_dacl_sddl(path) {
             Ok(current_dacl) if current_dacl == sddl => {
-                unsafe {
-                    let _ = LocalFree(descriptor);
-                }
+                free_local(descriptor.0);
                 return Ok(());
             }
             Ok(_) => {}
             Err(error) => {
-                unsafe {
-                    let _ = LocalFree(descriptor);
-                }
+                free_local(descriptor.0);
                 return Err(error);
             }
         }
     }
-    let secured = unsafe { SetFileSecurityW(path_wide.as_ptr(), security_information, descriptor) };
-    unsafe {
-        let _ = LocalFree(descriptor);
-    }
-    if secured == 0 {
+    let secured = unsafe {
+        SetFileSecurityW(
+            PCWSTR::from_raw(path_wide.as_ptr()),
+            security_information,
+            descriptor,
+        )
+    };
+    free_local(descriptor.0);
+    if !secured.as_bool() {
         return Err(format!(
             "could not set permissions on {}: {}",
             path.display(),
@@ -631,114 +622,112 @@ fn set_path_security_with_owner(
 }
 
 fn grant_service_control_to_users(service: &ServiceHandle) -> Result<(), Box<dyn Error>> {
-    let mut old_acl = ptr::null_mut();
-    let mut security_descriptor: PSECURITY_DESCRIPTOR = ptr::null_mut();
+    let mut old_acl: *mut ACL = ptr::null_mut();
+    let mut security_descriptor = PSECURITY_DESCRIPTOR(ptr::null_mut());
     let result = unsafe {
-        windows_sys::Win32::Security::Authorization::GetSecurityInfo(
-            service.0,
+        GetSecurityInfo(
+            windows::Win32::Foundation::HANDLE(service.0.0),
             SE_SERVICE,
             DACL_SECURITY_INFORMATION,
-            ptr::null_mut(),
-            ptr::null_mut(),
-            &mut old_acl,
-            ptr::null_mut(),
-            &mut security_descriptor,
+            None,
+            None,
+            Some(&mut old_acl),
+            None,
+            Some(&mut security_descriptor),
         )
     };
-    if result != 0 {
-        return Err(std::io::Error::from_raw_os_error(result as i32).into());
+    if result.0 != 0 {
+        return Err(std::io::Error::from_raw_os_error(result.0 as i32).into());
     }
 
     let users_sid_text = wide("S-1-5-32-545");
-    let mut users_sid: PSID = ptr::null_mut();
-    if unsafe { ConvertStringSidToSidW(users_sid_text.as_ptr(), &mut users_sid) } == 0 {
-        unsafe {
-            let _ = LocalFree(security_descriptor);
-        }
-        return Err(last_error("could not resolve the built-in Users SID"));
+    let mut users_sid = PSID(ptr::null_mut());
+    if let Err(error) =
+        unsafe { ConvertStringSidToSidW(PCWSTR::from_raw(users_sid_text.as_ptr()), &mut users_sid) }
+    {
+        free_local(security_descriptor.0);
+        return Err(last_error_with_source(
+            "could not resolve the built-in Users SID",
+            error,
+        ));
     }
-    let mut entry = windows_sys::Win32::Security::Authorization::EXPLICIT_ACCESS_W::default();
-    unsafe {
-        BuildTrusteeWithSidW(&mut entry.Trustee, users_sid);
-    }
+    let mut entry = EXPLICIT_ACCESS_W::default();
+    unsafe { BuildTrusteeWithSidW(&mut entry.Trustee, Some(users_sid)) };
     entry.grfAccessPermissions = SERVICE_CONTROL_RIGHTS;
-    entry.grfAccessMode = windows_sys::Win32::Security::Authorization::GRANT_ACCESS;
-    let mut new_acl = ptr::null_mut();
-    let result = unsafe { SetEntriesInAclW(1, &entry, old_acl, &mut new_acl) };
-    if result != 0 {
-        unsafe {
-            let _ = LocalFree(users_sid);
-            let _ = LocalFree(security_descriptor);
-        }
-        return Err(std::io::Error::from_raw_os_error(result as i32).into());
+    entry.grfAccessMode = GRANT_ACCESS;
+    let mut new_acl: *mut ACL = ptr::null_mut();
+    let result = unsafe {
+        SetEntriesInAclW(
+            Some(std::slice::from_ref(&entry)),
+            Some(old_acl),
+            &mut new_acl,
+        )
+    };
+    if result.0 != 0 {
+        free_local(users_sid.0);
+        free_local(security_descriptor.0);
+        return Err(std::io::Error::from_raw_os_error(result.0 as i32).into());
     }
     let result = unsafe {
         SetSecurityInfo(
-            service.0,
+            windows::Win32::Foundation::HANDLE(service.0.0),
             SE_SERVICE,
             DACL_SECURITY_INFORMATION,
-            ptr::null_mut(),
-            ptr::null_mut(),
-            new_acl,
-            ptr::null_mut(),
+            None,
+            None,
+            Some(new_acl),
+            None,
         )
     };
-    unsafe {
-        let _ = LocalFree(users_sid);
-        let _ = LocalFree(new_acl.cast());
-        let _ = LocalFree(security_descriptor);
-    }
-    if result != 0 {
-        return Err(std::io::Error::from_raw_os_error(result as i32).into());
+    free_local(users_sid.0);
+    free_local(new_acl.cast());
+    free_local(security_descriptor.0);
+    if result.0 != 0 {
+        return Err(std::io::Error::from_raw_os_error(result.0 as i32).into());
     }
     Ok(())
 }
 
 fn path_dacl_sddl(path: &Path) -> Result<String, Box<dyn Error>> {
-    use windows_sys::Win32::Security::Authorization::{
-        ConvertSecurityDescriptorToStringSecurityDescriptorW, GetNamedSecurityInfoW, SE_FILE_OBJECT,
-    };
-
     let path = wide(&path.to_string_lossy());
-    let mut descriptor: PSECURITY_DESCRIPTOR = ptr::null_mut();
+    let mut descriptor = PSECURITY_DESCRIPTOR(ptr::null_mut());
     let result = unsafe {
         GetNamedSecurityInfoW(
-            path.as_ptr(),
+            PCWSTR::from_raw(path.as_ptr()),
             SE_FILE_OBJECT,
             DACL_SECURITY_INFORMATION,
-            ptr::null_mut(),
-            ptr::null_mut(),
-            ptr::null_mut(),
-            ptr::null_mut(),
+            None,
+            None,
+            None,
+            None,
             &mut descriptor,
         )
     };
-    if result != 0 {
-        return Err(std::io::Error::from_raw_os_error(result as i32).into());
+    if result.0 != 0 {
+        return Err(std::io::Error::from_raw_os_error(result.0 as i32).into());
     }
-    let mut text: *mut u16 = ptr::null_mut();
+    let mut text = PWSTR::null();
     let converted = unsafe {
         ConvertSecurityDescriptorToStringSecurityDescriptorW(
             descriptor,
             1,
             DACL_SECURITY_INFORMATION,
             &mut text,
-            ptr::null_mut(),
+            None,
         )
     };
-    unsafe {
-        let _ = LocalFree(descriptor);
-    }
-    if converted == 0 {
-        return Err(last_error("could not read the test security descriptor"));
-    }
+    free_local(descriptor.0);
+    converted.map_err(|error| {
+        last_error_with_source("could not read the test security descriptor", error)
+    })?;
     let mut length = 0;
+    // The returned security string is NUL-terminated and owned by LocalAlloc.
     unsafe {
-        while *text.add(length) != 0 {
+        while *text.0.add(length) != 0 {
             length += 1;
         }
-        let value = String::from_utf16_lossy(std::slice::from_raw_parts(text, length));
-        let _ = LocalFree(text.cast());
+        let value = String::from_utf16_lossy(std::slice::from_raw_parts(text.0, length));
+        free_local(text.0.cast());
         Ok(value)
     }
 }
@@ -768,22 +757,22 @@ fn verify_runtime_files(executable: &Path) -> Result<(), Box<dyn Error>> {
 
 fn register_event_source(executable: &Path) -> Result<(), Box<dyn Error>> {
     let key_path = wide(EVENT_SOURCE_KEY);
-    let mut key = ptr::null_mut();
+    let mut key = HKEY(ptr::null_mut());
     let created = unsafe {
         RegCreateKeyExW(
             HKEY_LOCAL_MACHINE,
-            key_path.as_ptr(),
-            0,
-            ptr::null(),
-            0,
+            PCWSTR::from_raw(key_path.as_ptr()),
+            None,
+            PCWSTR::null(),
+            REG_OPTION_NON_VOLATILE,
             KEY_SET_VALUE,
-            ptr::null(),
+            None,
             &mut key,
-            ptr::null_mut(),
+            None,
         )
     };
-    if created != 0 {
-        return Err(std::io::Error::from_raw_os_error(created as i32).into());
+    if created.0 != 0 {
+        return Err(std::io::Error::from_raw_os_error(created.0 as i32).into());
     }
 
     let result = (|| {
@@ -800,54 +789,53 @@ fn register_event_source(executable: &Path) -> Result<(), Box<dyn Error>> {
 
 fn unregister_event_source() -> Result<(), Box<dyn Error>> {
     let key_path = wide(EVENT_SOURCE_KEY);
-    let result = unsafe { RegDeleteTreeW(HKEY_LOCAL_MACHINE, key_path.as_ptr()) };
-    if result != 0 && result != ERROR_FILE_NOT_FOUND {
-        return Err(std::io::Error::from_raw_os_error(result as i32).into());
+    let result = unsafe { RegDeleteTreeW(HKEY_LOCAL_MACHINE, PCWSTR::from_raw(key_path.as_ptr())) };
+    if result.0 != 0 && result != ERROR_FILE_NOT_FOUND {
+        return Err(std::io::Error::from_raw_os_error(result.0 as i32).into());
     }
     Ok(())
 }
 
 fn set_registry_value(
-    key: windows_sys::Win32::System::Registry::HKEY,
+    key: HKEY,
     name: &str,
-    value_type: u32,
+    value_type: REG_VALUE_TYPE,
     value: &[u16],
 ) -> Result<(), Box<dyn Error>> {
     let name = wide(name);
+    let bytes = value
+        .iter()
+        .flat_map(|word| word.to_le_bytes())
+        .collect::<Vec<_>>();
     let result = unsafe {
         RegSetValueExW(
             key,
-            name.as_ptr(),
-            0,
+            PCWSTR::from_raw(name.as_ptr()),
+            None,
             value_type,
-            value.as_ptr().cast::<u8>(),
-            std::mem::size_of_val(value) as u32,
+            Some(&bytes),
         )
     };
-    if result != 0 {
-        return Err(std::io::Error::from_raw_os_error(result as i32).into());
+    if result.0 != 0 {
+        return Err(std::io::Error::from_raw_os_error(result.0 as i32).into());
     }
     Ok(())
 }
 
-fn set_registry_dword(
-    key: windows_sys::Win32::System::Registry::HKEY,
-    name: &str,
-    value: u32,
-) -> Result<(), Box<dyn Error>> {
+fn set_registry_dword(key: HKEY, name: &str, value: u32) -> Result<(), Box<dyn Error>> {
     let name = wide(name);
+    let bytes = value.to_le_bytes();
     let result = unsafe {
         RegSetValueExW(
             key,
-            name.as_ptr(),
-            0,
+            PCWSTR::from_raw(name.as_ptr()),
+            None,
             REG_DWORD,
-            (&value as *const u32).cast::<u8>(),
-            std::mem::size_of::<u32>() as u32,
+            Some(&bytes),
         )
     };
-    if result != 0 {
-        return Err(std::io::Error::from_raw_os_error(result as i32).into());
+    if result.0 != 0 {
+        return Err(std::io::Error::from_raw_os_error(result.0 as i32).into());
     }
     Ok(())
 }
@@ -859,28 +847,42 @@ fn wide(value: &str) -> Vec<u16> {
         .collect()
 }
 
-fn last_error(context: &str) -> Box<dyn Error> {
-    format!("{context}: {}", std::io::Error::last_os_error()).into()
+fn last_error_with_source(context: &str, error: windows::core::Error) -> Box<dyn Error> {
+    format!("{context}: {}", win_error_to_io(error)).into()
+}
+
+fn win32_error(error: &windows::core::Error) -> u32 {
+    error.code().0 as u32 & 0xffff
+}
+
+fn win32_error_io(error: &std::io::Error) -> u32 {
+    error.raw_os_error().unwrap_or_default() as u32
+}
+
+fn win_error_to_io(error: windows::core::Error) -> std::io::Error {
+    std::io::Error::from_raw_os_error(win32_error(&error) as i32)
+}
+
+fn free_local(pointer: *mut core::ffi::c_void) {
+    // These pointers are allocated by Windows security APIs using LocalAlloc.
+    unsafe {
+        let _ = LocalFree(Some(HLOCAL(pointer)));
+    }
 }
 
 pub fn dispatch() -> Result<(), Box<dyn Error>> {
     STOP_REQUESTED.store(false, Ordering::Release);
-    let mut entries = [
+    let entries = [
         SERVICE_TABLE_ENTRYW {
-            lpServiceName: SERVICE_NAME.as_ptr() as *mut u16,
+            lpServiceName: PWSTR(SERVICE_NAME.as_ptr() as *mut u16),
             lpServiceProc: Some(service_main),
         },
         SERVICE_TABLE_ENTRYW {
-            lpServiceName: ptr::null_mut(),
+            lpServiceName: PWSTR::null(),
             lpServiceProc: None,
         },
     ];
-    let result = unsafe { StartServiceCtrlDispatcherW(entries.as_mut_ptr()) };
-    if result == 0 {
-        let error = std::io::Error::last_os_error();
-        return Err(error.into());
-    }
-    Ok(())
+    unsafe { StartServiceCtrlDispatcherW(entries.as_ptr()) }.map_err(Into::into)
 }
 
 pub fn attach_runtime(runtime: &Arc<RuntimeState>) {
@@ -905,45 +907,52 @@ fn log_information(message: &str) {
     log_event(EVENTLOG_INFORMATION_TYPE, 0x1000, message);
 }
 
-fn log_event(event_type: u16, event_id: u32, message: &str) {
-    let source = unsafe { RegisterEventSourceW(ptr::null(), EVENT_SOURCE.as_ptr()) };
-    if source.is_null() {
+fn log_event(
+    event_type: windows::Win32::System::EventLog::REPORT_EVENT_TYPE,
+    event_id: u32,
+    message: &str,
+) {
+    let Ok(source) =
+        (unsafe { RegisterEventSourceW(PCWSTR::null(), PCWSTR::from_raw(EVENT_SOURCE.as_ptr())) })
+    else {
         return;
-    }
+    };
     let message: Vec<u16> = message.encode_utf16().chain(Some(0)).collect();
-    let strings = [message.as_ptr()];
+    let strings = [PCWSTR::from_raw(message.as_ptr())];
     unsafe {
         let _ = ReportEventW(
             source,
             event_type,
             0,
             event_id,
-            ptr::null_mut(),
-            1,
+            None,
             0,
-            strings.as_ptr(),
-            ptr::null(),
+            Some(&strings),
+            None,
         );
         let _ = DeregisterEventSource(source);
     }
 }
 
-unsafe extern "system" fn service_main(_argc: u32, _argv: *mut *mut u16) {
+// The service control manager invokes this callback with the system ABI.
+unsafe extern "system" fn service_main(_argc: u32, _argv: *mut PWSTR) {
     let status_handle = unsafe {
         RegisterServiceCtrlHandlerExW(
-            SERVICE_NAME.as_ptr(),
+            PCWSTR::from_raw(SERVICE_NAME.as_ptr()),
             Some(control_handler),
-            ptr::null_mut(),
+            None,
         )
     };
-    if status_handle.is_null() {
-        log_error(&format!(
-            "could not register service control handler: {}",
-            std::io::Error::last_os_error()
-        ));
-        return;
-    }
-    STATUS_HANDLE.store(status_handle as isize, Ordering::Release);
+    let status_handle = match status_handle {
+        Ok(handle) => handle,
+        Err(error) => {
+            log_error(&format!(
+                "could not register service control handler: {error}"
+            ));
+            return;
+        }
+    };
+    STATUS_HANDLE.store(status_handle.0 as isize, Ordering::Release);
     report_status(SERVICE_START_PENDING, 0, 0);
     log_information("service startup requested");
 
@@ -954,7 +963,7 @@ unsafe extern "system" fn service_main(_argc: u32, _argv: *mut *mut u16) {
         }
         Err(error) => {
             log_error(&format!("service startup or runtime failed: {error}"));
-            report_status(SERVICE_STOPPED, ERROR_SERVICE_SPECIFIC_ERROR, 1);
+            report_status(SERVICE_STOPPED, ERROR_SERVICE_SPECIFIC_ERROR.0, 1);
         }
     }
     STATUS_HANDLE.store(0, Ordering::Release);
@@ -964,6 +973,7 @@ unsafe extern "system" fn service_main(_argc: u32, _argv: *mut *mut u16) {
         .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
 }
 
+// The SCM invokes this callback while dispatching control requests.
 unsafe extern "system" fn control_handler(
     control: u32,
     _event_type: u32,
@@ -985,15 +995,19 @@ unsafe extern "system" fn control_handler(
             0
         }
         SERVICE_CONTROL_INTERROGATE => {
-            report_status(CURRENT_STATE.load(Ordering::Acquire), 0, 0);
+            report_status(
+                SERVICE_STATUS_CURRENT_STATE(CURRENT_STATE.load(Ordering::Acquire)),
+                0,
+                0,
+            );
             0
         }
         _ => 1,
     }
 }
 
-fn report_status(state: u32, exit_code: u32, service_exit_code: u32) {
-    CURRENT_STATE.store(state, Ordering::Release);
+fn report_status(state: SERVICE_STATUS_CURRENT_STATE, exit_code: u32, service_exit_code: u32) {
+    CURRENT_STATE.store(state.0, Ordering::Release);
     let handle = STATUS_HANDLE.load(Ordering::Acquire);
     if handle == 0 {
         return;
@@ -1018,7 +1032,7 @@ fn report_status(state: u32, exit_code: u32, service_exit_code: u32) {
         dwWaitHint: wait_hint,
     };
     unsafe {
-        let _ = SetServiceStatus(handle as SERVICE_STATUS_HANDLE, &status);
+        let _ = SetServiceStatus(SERVICE_STATUS_HANDLE(handle as *mut _), &status);
     }
 }
 

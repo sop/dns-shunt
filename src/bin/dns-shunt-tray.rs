@@ -21,32 +21,36 @@ mod tray {
         ptr,
         sync::{Mutex, OnceLock},
     };
-    use windows_sys::Win32::{
-        Foundation::{ERROR_SERVICE_DOES_NOT_EXIST, HWND, LPARAM, LRESULT, WPARAM},
-        System::{
-            LibraryLoader::GetModuleHandleW,
-            Services::{
-                CloseServiceHandle, ControlService, OpenSCManagerW, OpenServiceW,
-                QueryServiceStatus, SC_MANAGER_CONNECT, SERVICE_CONTROL_STOP, SERVICE_QUERY_STATUS,
-                SERVICE_RUNNING, SERVICE_START, SERVICE_START_PENDING, SERVICE_STATUS,
-                SERVICE_STOP, SERVICE_STOP_PENDING, SERVICE_STOPPED, StartServiceW,
+    use windows::{
+        Win32::{
+            Foundation::{ERROR_SERVICE_DOES_NOT_EXIST, HWND, LPARAM, LRESULT, WPARAM},
+            System::{
+                LibraryLoader::GetModuleHandleW,
+                Services::{
+                    CloseServiceHandle, ControlService, OpenSCManagerW, OpenServiceW,
+                    QueryServiceStatus, SC_MANAGER_CONNECT, SERVICE_CONTROL_STOP,
+                    SERVICE_QUERY_STATUS, SERVICE_RUNNING, SERVICE_START, SERVICE_START_PENDING,
+                    SERVICE_STATUS, SERVICE_STOP, SERVICE_STOP_PENDING, SERVICE_STOPPED,
+                    StartServiceW,
+                },
+            },
+            UI::{
+                Shell::{
+                    NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE, NIM_MODIFY,
+                    NOTIFYICONDATAW, Shell_NotifyIconW, ShellExecuteW,
+                },
+                WindowsAndMessaging::{
+                    AppendMenuW, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyMenu,
+                    DestroyWindow, DispatchMessageW, FindWindowW, GetCursorPos, GetMessageW,
+                    LoadIconW, MB_ICONERROR, MB_OK, MF_GRAYED, MF_STRING, MessageBoxW,
+                    PostMessageW, PostQuitMessage, RegisterClassW, SW_HIDE, SW_SHOWNORMAL,
+                    SetForegroundWindow, SetTimer, ShowWindow, TPM_RETURNCMD, TrackPopupMenu,
+                    TranslateMessage, WM_CLOSE, WM_COMMAND, WM_CONTEXTMENU, WM_DESTROY,
+                    WM_LBUTTONDBLCLK, WM_NULL, WM_RBUTTONUP, WM_TIMER, WNDCLASSW, WS_OVERLAPPED,
+                },
             },
         },
-        UI::{
-            Shell::{
-                NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE, NOTIFYICONDATAW,
-                Shell_NotifyIconW, ShellExecuteW,
-            },
-            WindowsAndMessaging::{
-                AppendMenuW, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyMenu,
-                DispatchMessageW, FindWindowW, GetCursorPos, GetMessageW, LoadIconW, MB_ICONERROR,
-                MB_OK, MF_GRAYED, MF_STRING, MessageBoxW, PostMessageW, PostQuitMessage,
-                RegisterClassW, SW_HIDE, SW_SHOWNORMAL, SetForegroundWindow, SetTimer, ShowWindow,
-                TPM_RETURNCMD, TrackPopupMenu, TranslateMessage, WM_CLOSE, WM_COMMAND,
-                WM_CONTEXTMENU, WM_DESTROY, WM_LBUTTONDBLCLK, WM_NULL, WM_RBUTTONUP, WM_TIMER,
-                WNDCLASSW, WS_OVERLAPPED,
-            },
-        },
+        core::{PCWSTR, w},
     };
 
     const ICON_ID: u32 = 1;
@@ -80,19 +84,17 @@ mod tray {
         }))
         .map_err(|_| "tray application is already running".to_owned())?;
 
-        let instance = unsafe { GetModuleHandleW(ptr::null()) };
-        if instance.is_null() {
-            return Err(std::io::Error::last_os_error().to_string());
-        }
+        let instance =
+            unsafe { GetModuleHandleW(PCWSTR::null()) }.map_err(|error| error.to_string())?;
         let class_name = wide("DnsShuntTrayWindow");
-        if !unsafe { FindWindowW(class_name.as_ptr(), ptr::null()) }.is_null() {
+        if unsafe { FindWindowW(PCWSTR::from_raw(class_name.as_ptr()), PCWSTR::null()) }.is_ok() {
             return Ok(());
         }
         let title = wide("DNS Shunt");
         let window_class = WNDCLASSW {
             lpfnWndProc: Some(window_proc),
-            hInstance: instance,
-            lpszClassName: class_name.as_ptr(),
+            hInstance: instance.into(),
+            lpszClassName: PCWSTR::from_raw(class_name.as_ptr()),
             ..Default::default()
         };
         if unsafe { RegisterClassW(&window_class) } == 0 {
@@ -100,37 +102,35 @@ mod tray {
         }
         let hwnd = unsafe {
             CreateWindowExW(
-                0,
-                class_name.as_ptr(),
-                title.as_ptr(),
+                windows::Win32::UI::WindowsAndMessaging::WINDOW_EX_STYLE(0),
+                PCWSTR::from_raw(class_name.as_ptr()),
+                PCWSTR::from_raw(title.as_ptr()),
                 WS_OVERLAPPED,
                 0,
                 0,
                 0,
                 0,
-                ptr::null_mut(),
-                ptr::null_mut(),
-                instance,
-                ptr::null(),
+                None,
+                None,
+                Some(instance.into()),
+                None,
             )
-        };
-        if hwnd.is_null() {
-            return Err(std::io::Error::last_os_error().to_string());
         }
-        with_app(|app| app.hwnd = hwnd as isize);
+        .map_err(|error| error.to_string())?;
+        with_app(|app| app.hwnd = hwnd.0 as isize);
 
         add_tray_icon(hwnd)?;
         unsafe {
             let _ = ShowWindow(hwnd, SW_HIDE);
-            SetTimer(hwnd, TIMER_ID, 2_000, None);
-            let _ = PostMessageW(hwnd, WM_TIMER, TIMER_ID, 0);
+            SetTimer(Some(hwnd), TIMER_ID, 2_000, None);
+            let _ = PostMessageW(Some(hwnd), WM_TIMER, WPARAM(TIMER_ID), LPARAM(0));
         }
 
-        let mut message = unsafe { std::mem::zeroed() };
+        let mut message = windows::Win32::UI::WindowsAndMessaging::MSG::default();
         loop {
-            let result = unsafe { GetMessageW(&mut message, ptr::null_mut(), 0, 0) };
-            if result <= 0 {
-                if result < 0 {
+            let result = unsafe { GetMessageW(&mut message, None, 0, 0) };
+            if result.0 <= 0 {
+                if result.0 < 0 {
                     return Err(std::io::Error::last_os_error().to_string());
                 }
                 break;
@@ -143,6 +143,8 @@ mod tray {
         Ok(())
     }
 
+    // Windows calls this procedure using the system ABI and its HWND/message
+    // parameter contract.
     unsafe extern "system" fn window_proc(
         hwnd: HWND,
         message: u32,
@@ -151,7 +153,7 @@ mod tray {
     ) -> LRESULT {
         match message {
             ICON_CALLBACK => {
-                let event = lparam as u32;
+                let event = lparam.0 as u32;
                 if event == WM_RBUTTONUP || event == WM_CONTEXTMENU {
                     show_menu(hwnd);
                 } else if event == WM_LBUTTONDBLCLK {
@@ -160,39 +162,38 @@ mod tray {
                         open_gui(hwnd);
                     }
                 }
-                0
+                LRESULT(0)
             }
-            WM_TIMER if wparam == TIMER_ID => {
+            WM_TIMER if wparam.0 == TIMER_ID => {
                 refresh_state(hwnd, true);
-                0
+                LRESULT(0)
             }
             WM_COMMAND => {
-                dispatch_command(hwnd, (wparam & 0xffff) as u32);
-                0
+                dispatch_command(hwnd, (wparam.0 & 0xffff) as u32);
+                LRESULT(0)
             }
             WM_DESTROY => {
                 unsafe {
-                    let _ = SetTimer(hwnd, TIMER_ID, 0, None);
+                    let _ = SetTimer(Some(hwnd), TIMER_ID, 0, None);
                     remove_tray_icon(hwnd);
                     PostQuitMessage(0);
                 }
-                0
+                LRESULT(0)
             }
             WM_CLOSE => {
-                unsafe { windows_sys::Win32::UI::WindowsAndMessaging::DestroyWindow(hwnd) };
-                0
+                let _ = unsafe { DestroyWindow(hwnd) };
+                LRESULT(0)
             }
             _ => unsafe { DefWindowProcW(hwnd, message, wparam, lparam) },
         }
     }
 
     fn add_tray_icon(hwnd: HWND) -> Result<(), String> {
-        let instance = unsafe { GetModuleHandleW(ptr::null()) };
+        let instance =
+            unsafe { GetModuleHandleW(PCWSTR::null()) }.map_err(|error| error.to_string())?;
         let icon_resource = ptr::without_provenance::<u16>(1);
-        let icon = unsafe { LoadIconW(instance, icon_resource) };
-        if icon.is_null() {
-            return Err("could not load the DNS Shunt application icon".to_owned());
-        }
+        let icon = unsafe { LoadIconW(Some(instance.into()), PCWSTR::from_raw(icon_resource)) }
+            .map_err(|_| "could not load the DNS Shunt application icon".to_owned())?;
         let mut data = NOTIFYICONDATAW {
             cbSize: std::mem::size_of::<NOTIFYICONDATAW>() as u32,
             hWnd: hwnd,
@@ -203,7 +204,7 @@ mod tray {
             ..Default::default()
         };
         set_tip(&mut data, "DNS Shunt: Checking service");
-        if unsafe { Shell_NotifyIconW(NIM_ADD, &data) } == 0 {
+        if !unsafe { Shell_NotifyIconW(NIM_ADD, &data) }.as_bool() {
             return Err("could not add the DNS Shunt notification icon".to_owned());
         }
         Ok(())
@@ -269,18 +270,15 @@ mod tray {
             ..Default::default()
         };
         set_tip(&mut data, text);
-        unsafe {
-            let _ = Shell_NotifyIconW(windows_sys::Win32::UI::Shell::NIM_MODIFY, &data);
-        }
+        let _ = unsafe { Shell_NotifyIconW(NIM_MODIFY, &data) };
     }
 
     fn show_menu(hwnd: HWND) {
         refresh_state(hwnd, false);
         let state = current_state();
-        let menu = unsafe { CreatePopupMenu() };
-        if menu.is_null() {
+        let Ok(menu) = (unsafe { CreatePopupMenu() }) else {
             return;
-        }
+        };
         let status_text = format!("DNS Shunt service: {}", state_label(state));
         append_menu(menu, &status_text, STATUS_TEXT, true);
         let actions = state.menu_availability();
@@ -290,29 +288,38 @@ mod tray {
         append_menu(menu, "Open Rules File", MENU_RULES, !actions.open_rules);
         append_menu(menu, "Exit", MENU_EXIT, false);
 
-        let mut point = unsafe { std::mem::zeroed() };
+        let mut point = windows::Win32::Foundation::POINT::default();
         unsafe {
             let _ = GetCursorPos(&mut point);
             let _ = SetForegroundWindow(hwnd);
-            let command =
-                TrackPopupMenu(menu, TPM_RETURNCMD, point.x, point.y, 0, hwnd, ptr::null());
-            let _ = PostMessageW(hwnd, WM_NULL, 0, 0);
+            let command = TrackPopupMenu(menu, TPM_RETURNCMD, point.x, point.y, None, hwnd, None);
+            let _ = PostMessageW(Some(hwnd), WM_NULL, WPARAM(0), LPARAM(0));
             let _ = DestroyMenu(menu);
-            if command != 0 {
-                dispatch_command(hwnd, command as u32);
+            if command.0 != 0 {
+                dispatch_command(hwnd, command.0 as u32);
             }
         }
     }
 
     fn append_menu(
-        menu: windows_sys::Win32::UI::WindowsAndMessaging::HMENU,
+        menu: windows::Win32::UI::WindowsAndMessaging::HMENU,
         label: &str,
         id: u32,
         disabled: bool,
     ) {
-        let flags = MF_STRING | if disabled { MF_GRAYED } else { 0 };
+        let flags = MF_STRING
+            | if disabled {
+                MF_GRAYED
+            } else {
+                windows::Win32::UI::WindowsAndMessaging::MENU_ITEM_FLAGS(0)
+            };
         unsafe {
-            let _ = AppendMenuW(menu, flags, id as usize, wide(label).as_ptr());
+            let _ = AppendMenuW(
+                menu,
+                flags,
+                id as usize,
+                PCWSTR::from_raw(wide(label).as_ptr()),
+            );
         }
     }
 
@@ -362,7 +369,7 @@ mod tray {
                 }
             }
             MENU_EXIT => unsafe {
-                windows_sys::Win32::UI::WindowsAndMessaging::DestroyWindow(hwnd);
+                let _ = DestroyWindow(hwnd);
             },
             _ => {}
         }
@@ -371,30 +378,31 @@ mod tray {
     fn query_state() -> Result<ServiceState, String> {
         let manager = open_manager()?;
         let name = wide("DnsShunt");
-        let service = unsafe { OpenServiceW(manager, name.as_ptr(), SERVICE_QUERY_STATUS) };
-        if service.is_null() {
-            let error = std::io::Error::last_os_error();
-            if error.raw_os_error() == Some(ERROR_SERVICE_DOES_NOT_EXIST as i32) {
-                unsafe { CloseServiceHandle(manager) };
-                return Ok(ServiceState::Missing);
+        let service = match unsafe {
+            OpenServiceW(
+                manager,
+                PCWSTR::from_raw(name.as_ptr()),
+                SERVICE_QUERY_STATUS,
+            )
+        } {
+            Ok(service) => service,
+            Err(error) => {
+                unsafe {
+                    let _ = CloseServiceHandle(manager);
+                }
+                if win32_error(&error) == ERROR_SERVICE_DOES_NOT_EXIST.0 {
+                    return Ok(ServiceState::Missing);
+                }
+                return Err(error.to_string());
             }
-            unsafe { CloseServiceHandle(manager) };
-            return Err(error.to_string());
-        }
+        };
         let mut status = SERVICE_STATUS::default();
         let queried = unsafe { QueryServiceStatus(service, &mut status) };
-        let error = if queried == 0 {
-            Some(std::io::Error::last_os_error().to_string())
-        } else {
-            None
-        };
         unsafe {
             let _ = CloseServiceHandle(service);
             let _ = CloseServiceHandle(manager);
         }
-        if let Some(error) = error {
-            return Err(error);
-        }
+        queried.map_err(|error| error.to_string())?;
         Ok(match status.dwCurrentState {
             SERVICE_STOPPED => ServiceState::Stopped,
             SERVICE_RUNNING => ServiceState::Running,
@@ -403,70 +411,71 @@ mod tray {
         })
     }
 
-    fn open_manager() -> Result<windows_sys::Win32::System::Services::SC_HANDLE, String> {
-        let handle = unsafe { OpenSCManagerW(ptr::null(), ptr::null(), SC_MANAGER_CONNECT) };
-        if handle.is_null() {
-            Err(std::io::Error::last_os_error().to_string())
-        } else {
-            Ok(handle)
-        }
+    fn open_manager() -> Result<windows::Win32::System::Services::SC_HANDLE, String> {
+        unsafe { OpenSCManagerW(PCWSTR::null(), PCWSTR::null(), SC_MANAGER_CONNECT) }
+            .map_err(|error| error.to_string())
     }
 
     fn start_service() -> Result<(), String> {
         let manager = open_manager()?;
         let name = wide("DnsShunt");
-        let service =
-            unsafe { OpenServiceW(manager, name.as_ptr(), SERVICE_QUERY_STATUS | SERVICE_START) };
-        if service.is_null() {
-            let error = std::io::Error::last_os_error();
-            unsafe { CloseServiceHandle(manager) };
-            return Err(error.to_string());
-        }
-        let started = unsafe { StartServiceW(service, 0, ptr::null()) };
-        let error = if started == 0 {
-            let error = std::io::Error::last_os_error();
-            if error.raw_os_error() != Some(1056) {
-                Some(error.to_string())
-            } else {
-                None
+        let service = match unsafe {
+            OpenServiceW(
+                manager,
+                PCWSTR::from_raw(name.as_ptr()),
+                SERVICE_QUERY_STATUS | SERVICE_START,
+            )
+        } {
+            Ok(service) => service,
+            Err(error) => {
+                unsafe {
+                    let _ = CloseServiceHandle(manager);
+                }
+                return Err(error.to_string());
             }
-        } else {
-            None
         };
+        let error = unsafe { StartServiceW(service, None) }
+            .err()
+            .filter(|error| win32_error(error) != 1056);
         unsafe {
             let _ = CloseServiceHandle(service);
             let _ = CloseServiceHandle(manager);
         }
-        error.map_or(Ok(()), Err)
+        error.map_or(Ok(()), |error| Err(error.to_string()))
     }
 
     fn stop_service() -> Result<(), String> {
         let manager = open_manager()?;
         let name = wide("DnsShunt");
-        let service =
-            unsafe { OpenServiceW(manager, name.as_ptr(), SERVICE_QUERY_STATUS | SERVICE_STOP) };
-        if service.is_null() {
-            let error = std::io::Error::last_os_error();
-            unsafe { CloseServiceHandle(manager) };
-            return Err(error.to_string());
-        }
+        let service = match unsafe {
+            OpenServiceW(
+                manager,
+                PCWSTR::from_raw(name.as_ptr()),
+                SERVICE_QUERY_STATUS | SERVICE_STOP,
+            )
+        } {
+            Ok(service) => service,
+            Err(error) => {
+                unsafe {
+                    let _ = CloseServiceHandle(manager);
+                }
+                return Err(error.to_string());
+            }
+        };
         let mut status = SERVICE_STATUS::default();
-        let result = unsafe { QueryServiceStatus(service, &mut status) };
-        if result == 0 {
-            let error = std::io::Error::last_os_error().to_string();
+        if let Err(error) = unsafe { QueryServiceStatus(service, &mut status) } {
             unsafe {
                 let _ = CloseServiceHandle(service);
                 let _ = CloseServiceHandle(manager);
             }
-            return Err(error);
+            return Err(error.to_string());
         }
         let error = if status.dwCurrentState == SERVICE_STOPPED {
             None
         } else {
             let stopped = unsafe { ControlService(service, SERVICE_CONTROL_STOP, &mut status) };
-            if stopped == 0 {
-                let error = std::io::Error::last_os_error();
-                if error.raw_os_error() == Some(1062) {
+            if let Err(error) = stopped {
+                if win32_error(&error) == 1062 {
                     None
                 } else {
                     Some(error.to_string())
@@ -501,15 +510,15 @@ mod tray {
         let operation = wide("open");
         let result = unsafe {
             ShellExecuteW(
-                hwnd,
-                operation.as_ptr(),
-                url.as_ptr(),
-                ptr::null(),
-                ptr::null(),
+                Some(hwnd),
+                PCWSTR::from_raw(operation.as_ptr()),
+                PCWSTR::from_raw(url.as_ptr()),
+                PCWSTR::null(),
+                PCWSTR::null(),
                 SW_SHOWNORMAL,
             )
         };
-        if result as isize <= 32 {
+        if result.0 as isize <= 32 {
             show_error(hwnd, "Windows could not open the configured GUI URL.");
         }
     }
@@ -520,15 +529,15 @@ mod tray {
         let file = wide(&path.to_string_lossy());
         let result = unsafe {
             ShellExecuteW(
-                hwnd,
-                operation.as_ptr(),
-                file.as_ptr(),
-                ptr::null(),
-                ptr::null(),
+                Some(hwnd),
+                PCWSTR::from_raw(operation.as_ptr()),
+                PCWSTR::from_raw(file.as_ptr()),
+                PCWSTR::null(),
+                PCWSTR::null(),
                 SW_SHOWNORMAL,
             )
         };
-        if result as isize <= 32 {
+        if result.0 as isize <= 32 {
             show_error(
                 hwnd,
                 &format!(
@@ -542,12 +551,16 @@ mod tray {
     fn show_error(hwnd: HWND, message: &str) {
         unsafe {
             let _ = MessageBoxW(
-                hwnd,
-                wide(message).as_ptr(),
-                wide("DNS Shunt").as_ptr(),
+                Some(hwnd),
+                PCWSTR::from_raw(wide(message).as_ptr()),
+                w!("DNS Shunt"),
                 MB_OK | MB_ICONERROR,
             );
         }
+    }
+
+    fn win32_error(error: &windows::core::Error) -> u32 {
+        error.code().0 as u32 & 0xffff
     }
 
     fn current_state() -> ServiceState {
@@ -570,22 +583,25 @@ mod tray {
 
 #[cfg(target_os = "windows")]
 fn main() {
+    use windows::{
+        Win32::UI::WindowsAndMessaging::{
+            FindWindowW, MB_ICONERROR, MB_OK, MessageBoxW, SendMessageW, WM_CLOSE,
+        },
+        core::{PCWSTR, w},
+    };
+
     if std::env::args().any(|argument| argument == "--exit") {
         let class_name = "DnsShuntTrayWindow"
             .encode_utf16()
             .chain(Some(0))
             .collect::<Vec<_>>();
         unsafe {
-            let hwnd = windows_sys::Win32::UI::WindowsAndMessaging::FindWindowW(
-                class_name.as_ptr(),
-                std::ptr::null(),
-            );
-            if !hwnd.is_null() {
-                let _ = windows_sys::Win32::UI::WindowsAndMessaging::SendMessageW(
+            if let Ok(hwnd) = FindWindowW(PCWSTR::from_raw(class_name.as_ptr()), PCWSTR::null()) {
+                let _ = SendMessageW(
                     hwnd,
-                    windows_sys::Win32::UI::WindowsAndMessaging::WM_CLOSE,
-                    0,
-                    0,
+                    WM_CLOSE,
+                    Some(windows::Win32::Foundation::WPARAM(0)),
+                    Some(windows::Win32::Foundation::LPARAM(0)),
                 );
             }
         }
@@ -594,12 +610,11 @@ fn main() {
     if let Err(error) = tray::run() {
         let wide = error.encode_utf16().chain(Some(0)).collect::<Vec<_>>();
         unsafe {
-            let _ = windows_sys::Win32::UI::WindowsAndMessaging::MessageBoxW(
-                std::ptr::null_mut(),
-                wide.as_ptr(),
-                windows_sys::core::w!("DNS Shunt Tray"),
-                windows_sys::Win32::UI::WindowsAndMessaging::MB_OK
-                    | windows_sys::Win32::UI::WindowsAndMessaging::MB_ICONERROR,
+            let _ = MessageBoxW(
+                None,
+                PCWSTR::from_raw(wide.as_ptr()),
+                w!("DNS Shunt Tray"),
+                MB_OK | MB_ICONERROR,
             );
         }
     }

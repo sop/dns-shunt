@@ -122,7 +122,6 @@ dependencies = [
  "windivert",
  "windivert-sys",
  "windows",
- "windows-sys",
  "winres",
 ]
 
