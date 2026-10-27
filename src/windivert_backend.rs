@@ -4,7 +4,7 @@ use crate::{
     packet,
 };
 use std::{
-    ffi::{CString, c_void},
+    ffi::CString,
     io,
     sync::{
         Arc, Mutex, MutexGuard,
@@ -16,7 +16,7 @@ use windivert_sys::{
     ChecksumFlags, WinDivertClose, WinDivertFlags, WinDivertLayer, WinDivertOpen, WinDivertRecv,
     WinDivertSend, WinDivertShutdown, WinDivertShutdownMode,
 };
-use windows::Win32::Foundation::INVALID_HANDLE_VALUE;
+use windows_048::Win32::Foundation::{HANDLE, INVALID_HANDLE_VALUE};
 
 // Largest IPv6 packet: 40-byte base header plus the 16-bit payload length.
 const MAX_NETWORK_PACKET_SIZE: usize = 65_535 + 40;
@@ -38,7 +38,7 @@ struct WinDivertBackend {
 }
 
 struct WinDivertDriver {
-    handle: *mut c_void,
+    handle: HANDLE,
 }
 
 // WinDivert supports multi-threaded send/receive and shutdown on the same
@@ -57,7 +57,7 @@ impl WinDivertDriver {
                 WinDivertFlags::new(),
             )
         };
-        if handle == INVALID_HANDLE_VALUE.0 {
+        if handle == INVALID_HANDLE_VALUE {
             return Err(io::Error::last_os_error().into());
         }
         Ok(Self { handle })
@@ -78,7 +78,7 @@ impl WinDivertDriver {
                 address.as_mut(),
             )
         };
-        if result == 0 {
+        if !result.as_bool() {
             return Err(io::Error::last_os_error());
         }
         Ok((received as usize, address))
@@ -95,7 +95,7 @@ impl WinDivertDriver {
                 packet.address.as_ref(),
             )
         };
-        if result == 0 {
+        if !result.as_bool() {
             return Err(io::Error::last_os_error());
         }
         Ok(())
@@ -103,7 +103,7 @@ impl WinDivertDriver {
 
     fn shutdown_receive(&self) -> Result<(), io::Error> {
         let result = unsafe { WinDivertShutdown(self.handle, WinDivertShutdownMode::Recv) };
-        if result == 0 {
+        if !result.as_bool() {
             return Err(io::Error::last_os_error());
         }
         Ok(())
