@@ -98,12 +98,16 @@ struct Arguments {
     version: bool,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq)]
 enum ServiceCommand {
     Start,
     Stop,
     Install,
     Uninstall,
+    PrepareUpgrade {
+        install_dir: PathBuf,
+        error_file: PathBuf,
+    },
 }
 
 fn parse_arguments(
@@ -140,6 +144,19 @@ fn parse_arguments(
             }
             "--uninstall-service" => {
                 service_command = Some(ServiceCommand::Uninstall);
+                service_command_count += 1;
+            }
+            "--prepare-upgrade" => {
+                let path = args
+                    .next()
+                    .ok_or("--prepare-upgrade requires an install path")?;
+                let error_file = args
+                    .next()
+                    .ok_or("--prepare-upgrade requires an error-file path")?;
+                service_command = Some(ServiceCommand::PrepareUpgrade {
+                    install_dir: PathBuf::from(path),
+                    error_file: PathBuf::from(error_file),
+                });
                 service_command_count += 1;
             }
             "--help" | "-h" => help = true,
@@ -236,11 +253,12 @@ fn print_help() {
         "dns-shunt --version\n",
         "dns-shunt --service (Windows Service Control Manager only)\n\n",
         "dns-shunt --start-service | --stop-service | ",
-        "--install-service | --uninstall-service\n\n",
+        "--install-service | --uninstall-service\n",
+        "dns-shunt --prepare-upgrade <install-path> <error-file>\n\n",
         "Validate config by default. --run starts the loopback web admin ",
         "and elevated WinDivert capture. Rules are stored in ",
-        "the current user's application-data directory. Install and uninstall ",
-        "require an elevated administrator."
+        "the current user's application-data directory. Service installation, ",
+        "removal, and upgrade preparation require an elevated administrator."
     ));
 }
 
@@ -315,6 +333,27 @@ mod tests {
                 .service_command,
             Some(ServiceCommand::Uninstall)
         );
+        assert_eq!(
+            parse_arguments([
+                "--prepare-upgrade".to_owned(),
+                "C:\\Program Files\\DNS Shunt".to_owned(),
+                "C:\\Temp\\upgrade-error.txt".to_owned(),
+            ])
+            .unwrap()
+            .service_command,
+            Some(ServiceCommand::PrepareUpgrade {
+                install_dir: PathBuf::from("C:\\Program Files\\DNS Shunt"),
+                error_file: PathBuf::from("C:\\Temp\\upgrade-error.txt"),
+            })
+        );
+        assert!(parse_arguments(["--prepare-upgrade".to_owned()]).is_err());
+        assert!(
+            parse_arguments([
+                "--prepare-upgrade".to_owned(),
+                "C:\\Program Files\\DNS Shunt".to_owned(),
+            ])
+            .is_err()
+        );
         assert!(
             parse_arguments([
                 "--install-service".to_owned(),
@@ -324,6 +363,15 @@ mod tests {
         );
         assert!(
             parse_arguments(["--start-service".to_owned(), "--stop-service".to_owned(),]).is_err()
+        );
+        assert!(
+            parse_arguments([
+                "--prepare-upgrade".to_owned(),
+                "C:\\Program Files\\DNS Shunt".to_owned(),
+                "C:\\Temp\\upgrade-error.txt".to_owned(),
+                "--stop-service".to_owned(),
+            ])
+            .is_err()
         );
         assert!(
             parse_arguments(["--install-service".to_owned(), "--service".to_owned(),]).is_err()

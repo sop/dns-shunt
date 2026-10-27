@@ -103,8 +103,10 @@ pub fn service_paths() -> Result<ServicePaths, std::io::Error> {
 
 pub fn manage(command: crate::ServiceCommand) -> Result<(), Box<dyn Error>> {
     if matches!(
-        command,
-        crate::ServiceCommand::Install | crate::ServiceCommand::Uninstall
+        &command,
+        crate::ServiceCommand::Install
+            | crate::ServiceCommand::Uninstall
+            | crate::ServiceCommand::PrepareUpgrade { .. }
     ) && !unsafe { IsUserAnAdmin() }.as_bool()
     {
         return Err("service management requires an elevated administrator".into());
@@ -115,6 +117,23 @@ pub fn manage(command: crate::ServiceCommand) -> Result<(), Box<dyn Error>> {
         crate::ServiceCommand::Stop => stop_installed_service(),
         crate::ServiceCommand::Install => install_or_update_service(),
         crate::ServiceCommand::Uninstall => uninstall_service(),
+        crate::ServiceCommand::PrepareUpgrade {
+            install_dir,
+            error_file,
+        } => {
+            let result = prepare_upgrade(&install_dir);
+            if let Err(error) = result {
+                if let Err(write_error) = fs::write(&error_file, error.to_string()) {
+                    return Err(format!(
+                        "{error}; additionally could not write the upgrade failure details to {}: {write_error}",
+                        error_file.display()
+                    )
+                    .into());
+                }
+                return Err(error);
+            }
+            Ok(())
+        }
     }
 }
 
@@ -240,8 +259,50 @@ fn uninstall_service() -> Result<(), Box<dyn Error>> {
         Err(error) if win32_error_io(&error) == ERROR_SERVICE_DOES_NOT_EXIST.0 => {}
         Err(error) => return Err(error.into()),
     }
-    stop_installed_windivert_driver(&manager)?;
+    let install_dir = std::env::current_exe()?
+        .parent()
+        .ok_or("could not locate the application directory")?
+        .to_path_buf();
+    stop_windivert_driver(&manager, &install_dir)?;
     unregister_event_source()?;
+    Ok(())
+}
+
+fn prepare_upgrade(install_dir: &Path) -> Result<(), Box<dyn Error>> {
+    let manager = open_manager(SC_MANAGER_CONNECT)?;
+    let service = match open_named_service(
+        &manager,
+        "DnsShunt",
+        SERVICE_QUERY_STATUS | SERVICE_START | SERVICE_STOP,
+    ) {
+        Ok(service) => Some(service),
+        Err(error) if win32_error_io(&error) == ERROR_SERVICE_DOES_NOT_EXIST.0 => None,
+        Err(error) => return Err(error.into()),
+    };
+    let was_running = if let Some(service) = &service {
+        query_service_state(service, "DnsShunt")? == SERVICE_RUNNING
+    } else {
+        false
+    };
+
+    let result = (|| {
+        if let Some(service) = &service {
+            stop_named_handle(service, "DnsShunt")?;
+        }
+        stop_windivert_driver(&manager, install_dir)
+    })();
+    if let Err(error) = result {
+        if was_running
+            && let Some(service) = &service
+            && let Err(restore_error) = start_named_handle(service, "DnsShunt")
+        {
+            return Err(format!(
+                "{error}; additionally failed to restore the previously running DnsShunt service: {restore_error}"
+            )
+            .into());
+        }
+        return Err(error);
+    }
     Ok(())
 }
 
@@ -288,9 +349,6 @@ fn stop_named_handle(service: &ServiceHandle, service_name: &str) -> Result<(), 
             error,
         )
     })?;
-    if status.dwCurrentState == SERVICE_STOPPED {
-        return Ok(());
-    }
     if status.dwCurrentState != SERVICE_STOP_PENDING
         && let Err(error) = unsafe { ControlService(service.0, SERVICE_CONTROL_STOP, &mut status) }
         && win32_error(&error) != ERROR_SERVICE_NOT_ACTIVE.0
@@ -298,6 +356,29 @@ fn stop_named_handle(service: &ServiceHandle, service_name: &str) -> Result<(), 
         return Err(format!("could not stop the {service_name} service: {error}").into());
     }
     wait_for_service_state(service, SERVICE_STOPPED, service_name)
+}
+
+fn query_service_state(
+    service: &ServiceHandle,
+    service_name: &str,
+) -> Result<SERVICE_STATUS_CURRENT_STATE, Box<dyn Error>> {
+    let mut status = SERVICE_STATUS::default();
+    unsafe { QueryServiceStatus(service.0, &mut status) }.map_err(|error| {
+        last_error_with_source(
+            &format!("could not query the {service_name} service state"),
+            error,
+        )
+    })?;
+    Ok(status.dwCurrentState)
+}
+
+fn start_named_handle(service: &ServiceHandle, service_name: &str) -> Result<(), Box<dyn Error>> {
+    if let Err(error) = unsafe { StartServiceW(service.0, None) }
+        && win32_error(&error) != ERROR_SERVICE_ALREADY_RUNNING.0
+    {
+        return Err(format!("could not start the {service_name} service: {error}").into());
+    }
+    wait_for_service_state(service, SERVICE_RUNNING, service_name)
 }
 
 fn wait_for_service_state(
@@ -332,7 +413,10 @@ fn wait_for_service_state(
     }
 }
 
-fn stop_installed_windivert_driver(manager: &ServiceHandle) -> Result<(), Box<dyn Error>> {
+fn stop_windivert_driver(
+    manager: &ServiceHandle,
+    install_dir: &Path,
+) -> Result<(), Box<dyn Error>> {
     let driver = match open_named_service(
         manager,
         "WinDivert",
@@ -347,18 +431,9 @@ fn stop_installed_windivert_driver(manager: &ServiceHandle) -> Result<(), Box<dy
     };
 
     let image_path = service_binary_path(&driver)?;
-    let expected_path = std::env::current_exe()?
-        .parent()
-        .ok_or("could not locate the application directory")?
-        .join("WinDivert64.sys");
-    let image_path = normalize_driver_image_path(&image_path)?;
-    let expected_path = std::fs::canonicalize(expected_path)?;
-    eprintln!("WinDivert service image path: {}", image_path.display());
+    eprintln!("WinDivert service image path: {image_path}");
 
-    if !image_path
-        .to_string_lossy()
-        .eq_ignore_ascii_case(&expected_path.to_string_lossy())
-    {
+    if !driver_image_matches_install_dir(&image_path, install_dir)? {
         eprintln!("WinDivert is registered from a different path; leaving it running.");
         return Ok(());
     }
@@ -374,6 +449,17 @@ fn stop_installed_windivert_driver(manager: &ServiceHandle) -> Result<(), Box<dy
 
     eprintln!("Stopping the WinDivert driver loaded from the install directory.");
     stop_named_handle(&driver, "WinDivert")
+}
+
+fn driver_image_matches_install_dir(
+    image_path: &str,
+    install_dir: &Path,
+) -> Result<bool, Box<dyn Error>> {
+    let image_path = normalize_driver_image_path(image_path)?;
+    let expected_path = std::fs::canonicalize(install_dir.join("WinDivert64.sys"))?;
+    Ok(image_path
+        .to_string_lossy()
+        .eq_ignore_ascii_case(&expected_path.to_string_lossy()))
 }
 
 fn service_binary_path(service: &ServiceHandle) -> Result<String, Box<dyn Error>> {
@@ -1040,6 +1126,41 @@ fn report_status(state: SERVICE_STATUS_CURRENT_STATE, exit_code: u32, service_ex
 mod tests {
     use super::*;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn driver_image_matching_normalizes_paths_and_rejects_other_installations() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "dns-shunt-driver-path-{}-{nonce}",
+            std::process::id()
+        ));
+        let install_dir = root.join("DNS Shunt");
+        let other_install_dir = root.join("Other DNS Shunt");
+        fs::create_dir_all(&install_dir).unwrap();
+        fs::create_dir_all(&other_install_dir).unwrap();
+        let driver = install_dir.join("WinDivert64.sys");
+        fs::write(&driver, b"driver").unwrap();
+        fs::write(other_install_dir.join("WinDivert64.sys"), b"driver").unwrap();
+
+        let quoted_path = format!("\"{}\"", driver.display());
+        assert!(driver_image_matches_install_dir(&quoted_path, &install_dir).unwrap());
+
+        let nt_path = format!(r"\??\{}", driver.display());
+        assert!(driver_image_matches_install_dir(&nt_path, &install_dir).unwrap());
+        let extended_path = format!(r"\\?\{}", driver.display());
+        assert!(driver_image_matches_install_dir(&extended_path, &install_dir).unwrap());
+        let differently_cased_path = driver.to_string_lossy().to_lowercase();
+        assert!(driver_image_matches_install_dir(&differently_cased_path, &install_dir).unwrap());
+        assert!(
+            !driver_image_matches_install_dir(&driver.to_string_lossy(), &other_install_dir)
+                .unwrap()
+        );
+
+        fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn rules_acl_toggles_users_modify_without_changing_config_acl() {

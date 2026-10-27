@@ -49,6 +49,7 @@ Root: HKLM; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: 
 function PrepareToInstall(var NeedsRestart: Boolean): String;
 var
   ExitCode: Integer;
+  PreparationErrors: TArrayOfString;
 begin
   Result := '';
   ExtractTemporaryFile('{#AppExe}');
@@ -57,15 +58,28 @@ begin
     ShellExecAsOriginalUser(
       'open', ExpandConstant('{app}\{#TrayExe}'), '--exit', '', SW_HIDE,
       ewWaitUntilTerminated, ExitCode);
+  DeleteFile(ExpandConstant('{tmp}\dns-shunt-upgrade-error.txt'));
   if not Exec(
     ExpandConstant('{tmp}\{#AppExe}'),
-    '--stop-service', '', SW_HIDE, ewWaitUntilTerminated, ExitCode) then
+    ExpandConstant(
+      '--prepare-upgrade "{app}" "{tmp}\dns-shunt-upgrade-error.txt"'),
+    '', SW_HIDE,
+    ewWaitUntilTerminated, ExitCode) then
   begin
-    Result := 'Could not run the native service stop command.';
+    Result := 'Could not run the DNS Shunt upgrade preparation command. ' +
+      'The prior installation was not upgraded.';
     Exit;
   end;
   if ExitCode <> 0 then
-    Result := 'Could not stop the existing DNS Shunt service. Setup was not changed.';
+  begin
+    Result :=
+      'The DNS Shunt service or its matching WinDivert driver could not be ' +
+      'stopped. The prior installation was not upgraded.';
+    if LoadStringsFromFile(
+      ExpandConstant('{tmp}\dns-shunt-upgrade-error.txt'), PreparationErrors) and
+      (GetArrayLength(PreparationErrors) > 0) then
+      Result := Result + #13#10 + PreparationErrors[0];
+  end;
 end;
 
 procedure CurStepChanged(CurStep: TSetupStep);
