@@ -17,6 +17,21 @@ DNS Shunt only handles supported matching DNS requests. Other requests are
 passed through unchanged, and Windows continues to choose the DNS resolver.
 The app does not change network adapter settings or configure a resolver.
 
+## Use Cases
+
+- **Local development:** Point development domains at a local service while
+  keeping the hostname your app expects.
+- **Staging and QA:** Direct selected domains to a staging or QA endpoint from
+  your machine without changing system DNS settings.
+- **Deployment testing:** Check a new server by its production hostname before
+  changing public DNS.
+- **Migration and rollback:** Temporarily direct a hostname to an old or new
+  endpoint while validating a migration or recovery.
+- **Virtual host and TLS checks:** Test hostname-based web server routing and
+  certificates against a chosen server IP.
+- **Troubleshooting:** Reproduce an issue against a diagnostic endpoint or
+  resolve an internal service name to a reachable private IP.
+
 ## Requirements
 
 - Windows 10 or 11, 64-bit.

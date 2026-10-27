@@ -351,6 +351,45 @@ h1 em {
   line-height: 1.75;
 }
 
+.use-case-section {
+  padding-bottom: 70px;
+}
+
+.use-case-heading {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px 24px;
+  margin-bottom: 18px;
+}
+
+.use-case-heading .index {
+  margin: 0;
+}
+
+.use-case-heading h2 {
+  margin: 0;
+  font: 500 clamp(23px, 3vw, 31px)/1.2 system-ui, sans-serif;
+  letter-spacing: -.04em;
+}
+
+.use-cases {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.use-case-card {
+  min-height: 185px;
+}
+
+.use-case-card h3 {
+  margin: 21px 0 9px;
+  font: 500 17px/1.35 system-ui, sans-serif;
+  letter-spacing: -.025em;
+}
+
 .footer {
   display: flex;
   flex-wrap: wrap;
@@ -391,11 +430,23 @@ h1 em {
     padding-bottom: 48px;
   }
 
+  .use-case-section {
+    padding-bottom: 48px;
+  }
+
+  .use-cases {
+    grid-template-columns: 1fr;
+  }
+
   .detail-card {
     min-height: 0;
   }
 
   .detail-card h2 {
+    margin-top: 17px;
+  }
+
+  .use-case-card h3 {
     margin-top: 17px;
   }
 }

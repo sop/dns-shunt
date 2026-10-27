@@ -53,8 +53,9 @@ directory:
 
 The script builds the `x86_64-pc-windows-msvc` release, downloads or reuses the
 pinned WinDivert 2.2.2 x64 archive, checks its SHA-256 and driver signature,
-then compiles `dist\DNS-Shunt-Setup.exe`. Staged files and the archive cache
-are isolated under `dist\`; the workflow does not modify
+then compiles `dist\DNS-Shunt-Setup-<version>.exe` (currently
+`DNS-Shunt-Setup-0.1.0.exe`). Staged files and the archive cache are isolated
+under `dist\`; the workflow does not modify
 `target\debug`/`target\release` runtime assets or stop an active WinDivert
 driver.
 
