@@ -38,35 +38,22 @@ impl RuleManager {
         reserved_name: String,
         default_ttl: u32,
     ) -> Result<Self, RuleStoreError> {
-        let inputs = match fs::read(&path) {
-            Ok(bytes) => serde_json::from_slice::<Vec<RuleInput>>(&bytes)?,
+        let (inputs, stored_value) = match fs::read(&path) {
+            Ok(bytes) => {
+                let value: serde_json::Value = serde_json::from_slice(&bytes)?;
+                let inputs = serde_json::from_value(value.clone())?;
+                (inputs, Some(value))
+            }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                 persist(&path, &[])?;
-                Vec::new()
+                (Vec::new(), None)
             }
             Err(error) => return Err(error.into()),
         };
-        let input_order = inputs
-            .iter()
-            .map(|input| {
-                let wildcard = input.name.starts_with("*.");
-                let name = input
-                    .name
-                    .strip_prefix("*.")
-                    .unwrap_or(&input.name)
-                    .trim_end_matches('.')
-                    .to_ascii_lowercase();
-                (name, wildcard)
-            })
-            .collect::<Vec<_>>();
         let rules = config::validate_rules(inputs, &reserved_name, default_ttl)?;
-        let sorted_order = rules
-            .iter()
-            .map(|rule| (rule.name.clone(), rule.wildcard))
-            .collect::<Vec<_>>();
-        if input_order != sorted_order {
-            let sorted_inputs = rules.iter().map(config::rule_input).collect::<Vec<_>>();
-            let _ = persist(&path, &sorted_inputs);
+        let canonical_inputs = rules.iter().map(config::rule_input).collect::<Vec<_>>();
+        if stored_value.as_ref() != Some(&serde_json::to_value(&canonical_inputs)?) {
+            let _ = persist(&path, &canonical_inputs);
         }
         Ok(Self {
             path,
@@ -236,7 +223,9 @@ mod tests {
     fn input(name: &str, address: &str) -> RuleInput {
         RuleInput {
             name: name.into(),
-            address: address.into(),
+            record_type: config::RuleType::A,
+            address: Some(address.into()),
+            target: None,
             ttl: Some(60),
         }
     }
@@ -272,6 +261,25 @@ mod tests {
     }
 
     #[test]
+    fn loads_legacy_address_rules_as_a_and_canonicalizes_them_typed() {
+        let path = test_path();
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(
+            &path,
+            br#"[{"name":"legacy.example","address":"192.0.2.9","ttl":60}]"#,
+        )
+        .unwrap();
+
+        let manager = RuleManager::load(path.clone(), "dns-shunt.local".into(), 30).unwrap();
+        assert_eq!(manager.snapshot()[0].record_type, config::RuleType::A);
+        let persisted: serde_json::Value =
+            serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        assert_eq!(persisted[0]["type"], "A");
+        assert_eq!(persisted[0]["address"], "192.0.2.9");
+        let _ = fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
     fn persists_reloads_and_updates_overlapping_wildcard_rules() {
         let path = test_path();
         let manager = RuleManager::load(path.clone(), "dns-shunt.local".into(), 60).unwrap();
@@ -291,14 +299,14 @@ mod tests {
                 .lookup_normalized("www.sub.example.com")
                 .unwrap()
                 .address,
-            "192.0.2.2".parse::<std::net::Ipv4Addr>().unwrap()
+            Some("192.0.2.2".parse::<std::net::Ipv4Addr>().unwrap())
         );
         assert_eq!(
             snapshot
                 .lookup_normalized("www.example.com")
                 .unwrap()
                 .address,
-            "192.0.2.1".parse::<std::net::Ipv4Addr>().unwrap()
+            Some("192.0.2.1".parse::<std::net::Ipv4Addr>().unwrap())
         );
 
         let stored: Vec<RuleInput> = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();

@@ -137,7 +137,9 @@ fn bench_supported_query_classification(iterations: usize) {
         config::validate_rules(
             vec![config::RuleInput {
                 name: "assets.example".into(),
-                address: "192.0.2.1".into(),
+                record_type: config::RuleType::A,
+                address: Some("192.0.2.1".into()),
+                target: None,
                 ttl: Some(60),
             }],
             "dns-shunt.local",
@@ -177,7 +179,9 @@ fn bench_rule_lookup(iterations: usize) {
         let inputs = (0..count)
             .map(|index| config::RuleInput {
                 name: format!("host{index:05}.example.test"),
-                address: "192.0.2.1".into(),
+                record_type: config::RuleType::A,
+                address: Some("192.0.2.1".into()),
+                target: None,
                 ttl: Some(60),
             })
             .collect();
@@ -205,7 +209,9 @@ fn bench_snapshot_clone() {
         let inputs = (0..count)
             .map(|index| config::RuleInput {
                 name: format!("host{index:05}.example.test"),
-                address: "192.0.2.1".into(),
+                record_type: config::RuleType::A,
+                address: Some("192.0.2.1".into()),
+                target: None,
                 ttl: Some(60),
             })
             .collect();

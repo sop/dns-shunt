@@ -228,12 +228,13 @@
 
       form {
         display: grid;
-        grid-template-columns: 1.2fr 1fr 100px auto;
+        grid-template-columns: 1.1fr 105px minmax(130px, 1fr) 90px auto;
         gap: 8px;
         margin-bottom: 16px;
       }
 
       input,
+      select,
       button {
         min-width: 0;
         padding: 10px;
@@ -244,7 +245,8 @@
         font: inherit;
       }
 
-      input:focus {
+      input:focus,
+      select:focus {
         outline: 1px solid var(--acid);
       }
 
@@ -488,8 +490,14 @@
             <input name="index" type="hidden" disabled>
             <input name="name" placeholder="host.example or *.example"
               required disabled>
+            <select name="type" aria-label="Rule type" disabled>
+              <option value="A">A</option>
+              <option value="CNAME">CNAME</option>
+            </select>
             <input name="address" placeholder="IPv4 address" required
               disabled>
+            <input name="target" placeholder="CNAME target" required
+              disabled hidden>
             <input name="ttl" type="number" min="1" max="86400"
               disabled
               placeholder="TTL">
@@ -506,7 +514,7 @@
               <thead>
                 <tr>
                   <th>Pattern</th>
-                  <th>IPv4 answer</th>
+                  <th>Type / data</th>
                   <th>TTL</th>
                   <th style="text-align: right">Hits</th>
                   <th>Actions</th>
@@ -612,7 +620,7 @@
       function updateMutationControls() {
         const enabled = Boolean(csrfToken) && !csrfExpired;
         document.querySelectorAll(
-          '#rule-form input, #rule-form button, #rules button'
+          '#rule-form input, #rule-form select, #rule-form button, #rules button'
         ).forEach(control => {
           control.disabled = !enabled;
         });
@@ -722,7 +730,8 @@
         const ruleRows = rules.length
           ? rules.map((rule, index) =>
             '<tr><td>' + esc(rule.name) +
-            '</td><td>' + esc(rule.address) +
+            '</td><td>' + esc(rule.type) + ' ' +
+            esc(rule.type === 'CNAME' ? rule.target : rule.address) +
             '</td><td>' + rule.ttl + 's</td>' +
             '<td class="hit">' + rule.hits + '</td>' +
             '<td class="actions"><button class="edit" data-index="' + index +
@@ -734,7 +743,7 @@
           : '<tr><td class="empty" colspan="5">No custom rules.</td></tr>';
         $('rules').innerHTML = ruleRows +
           '<tr><td>' + esc(guiName) + ' <span class="count">' +
-          '(GUI hostname)</span></td><td>127.0.0.1</td><td>' + guiTtl +
+          '(GUI hostname)</span></td><td>A 127.0.0.1</td><td>' + guiTtl +
           's</td><td class="hit" id="gui-hits">' + guiHits +
           '</td><td></td></tr>';
         updateMutationControls();
@@ -796,7 +805,10 @@
           const form = $('rule-form');
           form.elements.index.value = index;
           form.elements.name.value = rule.name;
-          form.elements.address.value = rule.address;
+          form.elements.type.value = rule.type || 'A';
+          updateRuleDataField();
+          form.elements.address.value = rule.address || '';
+          form.elements.target.value = rule.target || '';
           form.elements.ttl.value = rule.ttl;
           form.querySelector('button[type=submit]').textContent =
             'Save changes';
@@ -817,6 +829,7 @@
         const form = $('rule-form');
         form.reset();
         form.querySelector('[name="index"]').value = '';
+        updateRuleDataField();
         form.querySelector('button[type=submit]').textContent = 'Add rule +';
         $('cancel-edit').hidden = true;
       }
@@ -825,6 +838,19 @@
         resetRuleForm();
         setNotice('Edit cancelled');
       });
+
+      function updateRuleDataField() {
+        const form = $('rule-form');
+        const isCname = form.elements.type.value === 'CNAME';
+        form.elements.address.hidden = isCname;
+        form.elements.address.required = !isCname;
+        form.elements.target.hidden = !isCname;
+        form.elements.target.required = isCname;
+      }
+
+      $('rule-form').elements.type.addEventListener(
+        'change', updateRuleDataField
+      );
 
       $('rule-form').addEventListener('submit', async event => {
         event.preventDefault();
@@ -835,9 +861,14 @@
         const index = form.get('index');
         const body = {
           name: form.get('name'),
-          address: form.get('address'),
+          type: form.get('type'),
           ttl: form.get('ttl') ? Number(form.get('ttl')) : null,
         };
+        if (body.type === 'CNAME') {
+          body.target = form.get('target');
+        } else {
+          body.address = form.get('address');
+        }
 
         try {
           await api('/api/rules', {
@@ -891,6 +922,7 @@
       }
 
       updateMutationControls();
+      updateRuleDataField();
       start();
       setInterval(renderUptime, 1000);
     </script>

@@ -2,11 +2,12 @@
 
 DNS Shunt is a Windows utility for managing local DNS overrides. Use its
 browser-based dashboard to direct selected domain names to chosen IP addresses
-without changing your Windows DNS settings.
+or local CNAME targets without changing your Windows DNS settings.
 
 ## What It Does
 
 - Create, edit, and remove DNS override rules in a local dashboard.
+- Create A address overrides and CNAME aliases, including wildcard aliases.
 - Match a domain exactly or use a wildcard for its subdomains.
 - Run as a Windows service with a notification-area tray app, or run it
   manually when needed.
@@ -16,6 +17,10 @@ without changing your Windows DNS settings.
 DNS Shunt only handles supported matching DNS requests. Other requests are
 passed through unchanged, and Windows continues to choose the DNS resolver.
 The app does not change network adapter settings or configure a resolver.
+CNAME chains are resolved locally when they reach a matching A rule; if a
+target is not locally ruled, DNS Shunt returns the known CNAME chain without
+querying upstream. The client may then look up that target through the unchanged
+DNS path.
 
 ## Use Cases
 

@@ -26,8 +26,19 @@ pub struct Config {
 pub struct Rule {
     pub name: String,
     pub wildcard: bool,
-    pub address: Ipv4Addr,
+    pub record_type: RuleType,
+    pub address: Option<Ipv4Addr>,
+    pub target: Option<String>,
     pub ttl: u32,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
+pub enum RuleType {
+    #[serde(rename = "A")]
+    #[default]
+    A,
+    #[serde(rename = "CNAME")]
+    Cname,
 }
 
 #[derive(Debug)]
@@ -81,7 +92,12 @@ impl CompiledRules {
 #[cfg_attr(not(any(target_os = "windows", test)), allow(dead_code))]
 pub struct RuleInput {
     pub name: String,
-    pub address: String,
+    #[serde(rename = "type", default)]
+    pub record_type: RuleType,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub address: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<String>,
     pub ttl: Option<u32>,
 }
 
@@ -109,6 +125,8 @@ pub enum ConfigError {
     GuiPort,
     #[error("invalid rule address for {0}")]
     RuleAddress(String),
+    #[error("invalid CNAME target for {0}")]
+    RuleTarget(String),
     #[error("invalid DNS name or wildcard syntax: {0}")]
     RuleName(String),
     #[error("rule TTL for {0} must be between 1 and 86400 seconds")]
@@ -165,19 +183,83 @@ pub fn validate_rules(
         if !seen.insert(key) {
             return Err(ConfigError::Conflict(input.name));
         }
-        let address = Ipv4Addr::from_str(&input.address)
-            .map_err(|_| ConfigError::RuleAddress(input.name.clone()))?;
+        let (address, target) = match input.record_type {
+            RuleType::A => {
+                if input.target.is_some() {
+                    return Err(ConfigError::Conflict(input.name));
+                }
+                let address = input
+                    .address
+                    .as_deref()
+                    .ok_or_else(|| ConfigError::RuleAddress(input.name.clone()))?;
+                (
+                    Some(
+                        Ipv4Addr::from_str(address)
+                            .map_err(|_| ConfigError::RuleAddress(input.name.clone()))?,
+                    ),
+                    None,
+                )
+            }
+            RuleType::Cname => {
+                if input.address.is_some() {
+                    return Err(ConfigError::Conflict(input.name));
+                }
+                let raw_target = input
+                    .target
+                    .as_deref()
+                    .ok_or_else(|| ConfigError::RuleTarget(input.name.clone()))?;
+                let (target, wildcard_target) = canonical_rule_name(raw_target)
+                    .map_err(|_| ConfigError::RuleTarget(input.name.clone()))?;
+                if wildcard_target {
+                    return Err(ConfigError::RuleTarget(input.name));
+                }
+                (None, Some(target))
+            }
+        };
         let ttl = input.ttl.unwrap_or(default_ttl);
         validate_ttl(ttl).map_err(|_| ConfigError::RuleTtl(input.name.clone()))?;
         rules.push(Rule {
             name,
             wildcard,
+            record_type: input.record_type,
             address,
+            target,
             ttl,
         });
     }
     rules.sort_by(compare_rules);
+    validate_cname_cycles(&rules, reserved_name)?;
     Ok(rules)
+}
+
+fn validate_cname_cycles(rules: &[Rule], reserved_name: &str) -> Result<(), ConfigError> {
+    let compiled = CompiledRules::new(rules.to_vec());
+    for rule in rules
+        .iter()
+        .filter(|rule| rule.record_type == RuleType::Cname)
+    {
+        let mut name = rule.target.as_deref().expect("validated CNAME target");
+        let mut visited = HashSet::new();
+        loop {
+            if name == reserved_name {
+                break;
+            }
+            if !visited.insert(name.to_owned()) {
+                return Err(ConfigError::Conflict(rule.name.clone()));
+            }
+            let Some(next) = compiled.lookup_normalized(name) else {
+                break;
+            };
+            if next.record_type != RuleType::Cname {
+                break;
+            }
+            name = next.target.as_deref().expect("validated CNAME target");
+            if visited.contains(name) {
+                return Err(ConfigError::Conflict(rule.name.clone()));
+            }
+        }
+    }
+    Ok(())
 }
 
 fn compare_rules(left: &Rule, right: &Rule) -> std::cmp::Ordering {
@@ -214,7 +296,9 @@ pub fn rule_input(rule: &Rule) -> RuleInput {
         } else {
             rule.name.clone()
         },
-        address: rule.address.to_string(),
+        record_type: rule.record_type,
+        address: rule.address.map(|address| address.to_string()),
+        target: rule.target.clone(),
         ttl: Some(rule.ttl),
     }
 }
@@ -276,15 +360,29 @@ mod tests {
         vec![
             RuleInput {
                 name: "example.com".into(),
-                address: "192.0.2.1".into(),
+                record_type: RuleType::A,
+                address: Some("192.0.2.1".into()),
+                target: None,
                 ttl: None,
             },
             RuleInput {
                 name: "*.example.net".into(),
-                address: "192.0.2.2".into(),
+                record_type: RuleType::A,
+                address: Some("192.0.2.2".into()),
+                target: None,
                 ttl: Some(30),
             },
         ]
+    }
+
+    fn cname_input(name: &str, target: &str) -> RuleInput {
+        RuleInput {
+            name: name.into(),
+            record_type: RuleType::Cname,
+            address: None,
+            target: Some(target.into()),
+            ttl: None,
+        }
     }
 
     #[test]
@@ -336,7 +434,9 @@ mod tests {
             validate_rules(
                 vec![RuleInput {
                     name: "DNS-SHUNT.LOCAL.".into(),
-                    address: "127.0.0.2".into(),
+                    record_type: RuleType::A,
+                    address: Some("127.0.0.2".into()),
+                    target: None,
                     ttl: None
                 }],
                 "dns-shunt.local",
@@ -348,7 +448,9 @@ mod tests {
             inputs()[0].clone(),
             RuleInput {
                 name: "EXAMPLE.COM.".into(),
-                address: "192.0.2.3".into(),
+                record_type: RuleType::A,
+                address: Some("192.0.2.3".into()),
+                target: None,
                 ttl: None,
             },
         ];
@@ -360,39 +462,51 @@ mod tests {
         let entries = vec![
             RuleInput {
                 name: "*.example.com".into(),
-                address: "192.0.2.1".into(),
+                record_type: RuleType::A,
+                address: Some("192.0.2.1".into()),
+                target: None,
                 ttl: None,
             },
             RuleInput {
                 name: "api.example.com".into(),
-                address: "192.0.2.2".into(),
+                record_type: RuleType::A,
+                address: Some("192.0.2.2".into()),
+                target: None,
                 ttl: None,
             },
         ];
         let rules = validate_rules(entries, "dns-shunt.local", 60).unwrap();
         assert_eq!(
             lookup_rule(&rules, "api.example.com").unwrap().address,
-            Ipv4Addr::new(192, 0, 2, 2)
+            Some(Ipv4Addr::new(192, 0, 2, 2))
         );
         for input in [
             RuleInput {
                 name: "bad..example".into(),
-                address: "192.0.2.1".into(),
+                record_type: RuleType::A,
+                address: Some("192.0.2.1".into()),
+                target: None,
                 ttl: None,
             },
             RuleInput {
                 name: "bad*.example".into(),
-                address: "192.0.2.1".into(),
+                record_type: RuleType::A,
+                address: Some("192.0.2.1".into()),
+                target: None,
                 ttl: None,
             },
             RuleInput {
                 name: "good.example".into(),
-                address: "not-an-ip".into(),
+                record_type: RuleType::A,
+                address: Some("not-an-ip".into()),
+                target: None,
                 ttl: None,
             },
             RuleInput {
                 name: "good.example".into(),
-                address: "192.0.2.1".into(),
+                record_type: RuleType::A,
+                address: Some("192.0.2.1".into()),
+                target: None,
                 ttl: Some(0),
             },
         ] {
@@ -406,17 +520,23 @@ mod tests {
     fn overlapping_wildcards_match_by_specificity_in_any_input_order() {
         let parent = RuleInput {
             name: "*.example.com".into(),
-            address: "192.0.2.1".into(),
+            record_type: RuleType::A,
+            address: Some("192.0.2.1".into()),
+            target: None,
             ttl: None,
         };
         let nested = RuleInput {
             name: "*.sub.example.com".into(),
-            address: "192.0.2.2".into(),
+            record_type: RuleType::A,
+            address: Some("192.0.2.2".into()),
+            target: None,
             ttl: None,
         };
         let exact = RuleInput {
             name: "api.sub.example.com".into(),
-            address: "192.0.2.3".into(),
+            record_type: RuleType::A,
+            address: Some("192.0.2.3".into()),
+            target: None,
             ttl: None,
         };
 
@@ -430,34 +550,34 @@ mod tests {
             for query in ["www.sub.example.com", "www.sub.example.com."] {
                 assert_eq!(
                     lookup_rule(&rules, query).unwrap().address,
-                    Ipv4Addr::new(192, 0, 2, 2)
+                    Some(Ipv4Addr::new(192, 0, 2, 2))
                 );
                 assert_eq!(
                     compiled.lookup(query).unwrap().address,
-                    Ipv4Addr::new(192, 0, 2, 2)
+                    Some(Ipv4Addr::new(192, 0, 2, 2))
                 );
             }
             assert_eq!(
                 lookup_rule(&rules, "www.example.com").unwrap().address,
-                Ipv4Addr::new(192, 0, 2, 1)
+                Some(Ipv4Addr::new(192, 0, 2, 1))
             );
             assert_eq!(
                 compiled.lookup("www.example.com").unwrap().address,
-                Ipv4Addr::new(192, 0, 2, 1)
+                Some(Ipv4Addr::new(192, 0, 2, 1))
             );
             assert_eq!(
                 lookup_rule(&rules, "api.sub.example.com").unwrap().address,
-                Ipv4Addr::new(192, 0, 2, 3)
+                Some(Ipv4Addr::new(192, 0, 2, 3))
             );
             assert_eq!(
                 compiled.lookup("api.sub.example.com").unwrap().address,
-                Ipv4Addr::new(192, 0, 2, 3)
+                Some(Ipv4Addr::new(192, 0, 2, 3))
             );
             assert!(lookup_rule(&rules, "example.com").is_none());
             assert!(compiled.lookup("example.com").is_none());
             assert_eq!(
                 compiled.lookup("sub.example.com").unwrap().address,
-                Ipv4Addr::new(192, 0, 2, 1)
+                Some(Ipv4Addr::new(192, 0, 2, 1))
             );
         }
 
@@ -466,12 +586,16 @@ mod tests {
                 vec![
                     RuleInput {
                         name: "*.Example.com.".into(),
-                        address: "192.0.2.1".into(),
+                        record_type: RuleType::A,
+                        address: Some("192.0.2.1".into()),
+                        target: None,
                         ttl: None,
                     },
                     RuleInput {
                         name: "*.example.com".into(),
-                        address: "192.0.2.2".into(),
+                        record_type: RuleType::A,
+                        address: Some("192.0.2.2".into()),
+                        target: None,
                         ttl: None,
                     },
                 ],
@@ -487,27 +611,37 @@ mod tests {
         let entries = vec![
             RuleInput {
                 name: "*.example.com".into(),
-                address: "192.0.2.1".into(),
+                record_type: RuleType::A,
+                address: Some("192.0.2.1".into()),
+                target: None,
                 ttl: None,
             },
             RuleInput {
                 name: "z.example.com".into(),
-                address: "192.0.2.2".into(),
+                record_type: RuleType::A,
+                address: Some("192.0.2.2".into()),
+                target: None,
                 ttl: None,
             },
             RuleInput {
                 name: "example.net".into(),
-                address: "192.0.2.3".into(),
+                record_type: RuleType::A,
+                address: Some("192.0.2.3".into()),
+                target: None,
                 ttl: None,
             },
             RuleInput {
                 name: "example.com".into(),
-                address: "192.0.2.4".into(),
+                record_type: RuleType::A,
+                address: Some("192.0.2.4".into()),
+                target: None,
                 ttl: None,
             },
             RuleInput {
                 name: "a.example.com".into(),
-                address: "192.0.2.5".into(),
+                record_type: RuleType::A,
+                address: Some("192.0.2.5".into()),
+                target: None,
                 ttl: None,
             },
         ];
@@ -540,17 +674,23 @@ mod tests {
         let entries = vec![
             RuleInput {
                 name: "*.example.net".into(),
-                address: "192.0.2.1".into(),
+                record_type: RuleType::A,
+                address: Some("192.0.2.1".into()),
+                target: None,
                 ttl: None,
             },
             RuleInput {
                 name: "api.example.net".into(),
-                address: "192.0.2.2".into(),
+                record_type: RuleType::A,
+                address: Some("192.0.2.2".into()),
+                target: None,
                 ttl: None,
             },
             RuleInput {
                 name: "*.example.com".into(),
-                address: "192.0.2.3".into(),
+                record_type: RuleType::A,
+                address: Some("192.0.2.3".into()),
+                target: None,
                 ttl: None,
             },
         ];
@@ -558,18 +698,92 @@ mod tests {
 
         assert_eq!(
             rules.lookup_normalized("api.example.net").unwrap().address,
-            Ipv4Addr::new(192, 0, 2, 2)
+            Some(Ipv4Addr::new(192, 0, 2, 2))
         );
         assert_eq!(
             rules.lookup_normalized("a.b.example.net").unwrap().address,
-            Ipv4Addr::new(192, 0, 2, 1)
+            Some(Ipv4Addr::new(192, 0, 2, 1))
         );
         assert!(rules.lookup_normalized("example.net").is_none());
         assert!(rules.lookup_normalized("notexample.net").is_none());
         assert_eq!(
             rules.lookup("WWW.EXAMPLE.COM.").unwrap().address,
-            Ipv4Addr::new(192, 0, 2, 3)
+            Some(Ipv4Addr::new(192, 0, 2, 3))
         );
         assert!(lookup_rule(rules.rules(), "API.EXAMPLE.NET.").is_some());
+    }
+
+    #[test]
+    fn accepts_legacy_a_rules_and_serializes_canonical_typed_rules() {
+        let legacy: RuleInput =
+            serde_json::from_str(r#"{"name":"legacy.example","address":"192.0.2.8","ttl":42}"#)
+                .unwrap();
+        let rules = validate_rules(vec![legacy], "dns-shunt.local", 60).unwrap();
+        assert_eq!(rules[0].record_type, RuleType::A);
+        assert_eq!(rules[0].address, Some(Ipv4Addr::new(192, 0, 2, 8)));
+        let stored = serde_json::to_value(rule_input(&rules[0])).unwrap();
+        assert_eq!(stored["type"], "A");
+        assert_eq!(stored["address"], "192.0.2.8");
+
+        let cname = validate_rules(
+            vec![cname_input("*.example.local", "example.local.")],
+            "dns-shunt.local",
+            60,
+        )
+        .unwrap();
+        assert_eq!(cname[0].target.as_deref(), Some("example.local"));
+        let stored = serde_json::to_value(rule_input(&cname[0])).unwrap();
+        assert_eq!(stored["type"], "CNAME");
+        assert_eq!(stored["target"], "example.local");
+        assert!(stored.get("address").is_none());
+    }
+
+    #[test]
+    fn validates_cname_targets_and_rejects_compiled_cycles() {
+        for invalid in [
+            cname_input("alias.example", "*.target.example"),
+            RuleInput {
+                name: "alias.example".into(),
+                record_type: RuleType::Cname,
+                address: Some("192.0.2.1".into()),
+                target: Some("target.example".into()),
+                ttl: None,
+            },
+            RuleInput {
+                name: "alias.example".into(),
+                record_type: RuleType::Cname,
+                address: None,
+                target: None,
+                ttl: None,
+            },
+        ] {
+            assert!(validate_rules(vec![invalid], "dns-shunt.local", 60).is_err());
+        }
+
+        for entries in [
+            vec![cname_input("a.example", "a.example")],
+            vec![
+                cname_input("a.example", "b.example"),
+                cname_input("b.example", "a.example"),
+            ],
+            vec![cname_input("*.example", "host.example")],
+        ] {
+            assert!(validate_rules(entries, "dns-shunt.local", 60).is_err());
+        }
+        let shadowed = validate_rules(
+            vec![
+                cname_input("*.example", "host.example"),
+                RuleInput {
+                    name: "host.example".into(),
+                    record_type: RuleType::A,
+                    address: Some("192.0.2.10".into()),
+                    target: None,
+                    ttl: None,
+                },
+            ],
+            "dns-shunt.local",
+            60,
+        );
+        assert!(shadowed.is_ok());
     }
 }

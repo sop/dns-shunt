@@ -141,28 +141,38 @@ impl RuntimeState {
         }
     }
 
+    #[cfg(test)]
     pub fn record_override(&self, rule: &Rule) {
+        self.record_synthesized(&[rule], false);
+    }
+
+    pub fn record_synthesized(&self, rules: &[&Rule], builtin: bool) {
         {
             let _stats = self
                 .stats_lock
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
             self.overrides.fetch_add(1, Ordering::Relaxed);
-            let key = if rule.wildcard {
-                format!("*.{}", rule.name)
-            } else {
-                rule.name.clone()
-            };
-            *self
+            if builtin {
+                self.builtin_hits.fetch_add(1, Ordering::Relaxed);
+            }
+            let mut hits = self
                 .rule_hits
                 .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .entry(key)
-                .or_default() += 1;
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            for rule in rules {
+                let key = if rule.wildcard {
+                    format!("*.{}", rule.name)
+                } else {
+                    rule.name.clone()
+                };
+                *hits.entry(key).or_default() += 1;
+            }
         }
         self.notify_stats_changed();
     }
 
+    #[cfg(test)]
     pub fn record_builtin_override(&self) {
         {
             let _stats = self
@@ -227,7 +237,7 @@ impl RuntimeState {
         self.event_changed.notify_all();
     }
 
-    fn statistics_snapshot(&self) -> Value {
+    pub(crate) fn statistics_snapshot(&self) -> Value {
         let _stats = self
             .stats_lock
             .lock()
@@ -292,12 +302,24 @@ impl RuntimeState {
                 } else {
                     rule.name.clone()
                 };
-                json!({
+                let mut value = json!({
                     "name": key,
-                    "address": rule.address.to_string(),
+                    "type": match rule.record_type {
+                        config::RuleType::A => "A",
+                        config::RuleType::Cname => "CNAME",
+                    },
                     "ttl": rule.ttl,
                     "hits": hits.get(&key).copied().unwrap_or(0),
-                })
+                });
+                match rule.record_type {
+                    config::RuleType::A => {
+                        value["address"] = json!(rule.address.expect("validated A address"));
+                    }
+                    config::RuleType::Cname => {
+                        value["target"] = json!(rule.target.expect("validated CNAME target"));
+                    }
+                }
+                value
             })
             .collect::<Vec<_>>();
         json!(rules)
@@ -603,9 +625,8 @@ fn read_request(stream: &mut TcpStream) -> Result<HttpRequest, String> {
 #[derive(Deserialize)]
 struct IndexedInput {
     index: usize,
-    name: String,
-    address: String,
-    ttl: Option<u32>,
+    #[serde(flatten)]
+    rule: config::RuleInput,
 }
 
 fn route(request: &HttpRequest, runtime: &RuntimeState) -> Result<(u16, Value), (u16, String)> {
@@ -635,11 +656,7 @@ fn route(request: &HttpRequest, runtime: &RuntimeState) -> Result<(u16, Value), 
                         return Err("rule index is out of range".into());
                     }
                     let mut next = current.iter().map(config::rule_input).collect::<Vec<_>>();
-                    next[input.index] = config::RuleInput {
-                        name: input.name,
-                        address: input.address,
-                        ttl: input.ttl,
-                    };
+                    next[input.index] = input.rule;
                     Ok(next)
                 })
                 .map_err(store_error)?;
@@ -925,7 +942,9 @@ mod tests {
             .transact(|_| {
                 Ok(vec![config::RuleInput {
                     name: "secret.example".into(),
-                    address: "192.0.2.55".into(),
+                    record_type: config::RuleType::A,
+                    address: Some("192.0.2.55".into()),
+                    target: None,
                     ttl: None,
                 }])
             })
@@ -1017,7 +1036,7 @@ mod tests {
         );
         assert!(response.starts_with(b"HTTP/1.1 201 Created\r\n"));
         assert!(state.rules.snapshot().iter().any(|rule| {
-            rule.name == "blocked.example" && rule.address.to_string() == "192.0.2.9"
+            rule.name == "blocked.example" && rule.address.unwrap().to_string() == "192.0.2.9"
         }));
         assert!(
             !response
@@ -1178,6 +1197,56 @@ mod tests {
     }
 
     #[test]
+    fn supports_typed_cname_api_crud_and_rejects_invalid_data_combinations() {
+        let runtime = runtime();
+        let created = route(
+            &request(
+                "POST",
+                "/api/rules",
+                r#"{"name":"alias.example","type":"CNAME","target":"target.example","ttl":30}"#,
+            ),
+            &runtime,
+        )
+        .unwrap();
+        assert_eq!(created.0, 201);
+        let rule = &runtime.rules_json()[0];
+        assert_eq!(rule["type"], "CNAME");
+        assert_eq!(rule["target"], "target.example");
+        assert!(rule.get("address").is_none());
+
+        assert_eq!(
+            route(
+                &request(
+                    "PUT",
+                    "/api/rules",
+                    r#"{"index":0,"name":"alias.example","type":"A","address":"192.0.2.22"}"#,
+                ),
+                &runtime,
+            )
+            .unwrap()
+            .0,
+            200
+        );
+        assert_eq!(runtime.rules_json()[0]["type"], "A");
+        assert_eq!(runtime.rules_json()[0]["address"], "192.0.2.22");
+
+        for body in [
+            r#"{"name":"missing.example","type":"CNAME"}"#,
+            r#"{"name":"conflict.example","type":"CNAME","target":"target.example","address":"192.0.2.1"}"#,
+            r#"{"name":"conflict.example","type":"A","address":"192.0.2.1","target":"target.example"}"#,
+        ] {
+            assert_eq!(
+                route(&request("POST", "/api/rules", body), &runtime)
+                    .unwrap_err()
+                    .0,
+                400
+            );
+        }
+        assert!(DASHBOARD.contains("CNAME target"));
+        assert!(DASHBOARD.contains("updateRuleDataField"));
+    }
+
+    #[test]
     fn all_rule_mutations_require_the_current_csrf_token() {
         let state = runtime();
         let port = state.config.gui_port;
@@ -1265,7 +1334,9 @@ mod tests {
         let rule = config::validate_rules(
             vec![config::RuleInput {
                 name: "hit.example".into(),
-                address: "192.0.2.1".into(),
+                record_type: config::RuleType::A,
+                address: Some("192.0.2.1".into()),
+                target: None,
                 ttl: None,
             }],
             &state.config.gui_name,
@@ -1298,7 +1369,9 @@ mod tests {
         let rule = config::validate_rules(
             vec![config::RuleInput {
                 name: "stats.example".into(),
-                address: "192.0.2.1".into(),
+                record_type: config::RuleType::A,
+                address: Some("192.0.2.1".into()),
+                target: None,
                 ttl: None,
             }],
             &state.config.gui_name,
@@ -1473,7 +1546,9 @@ mod tests {
         let rule = config::validate_rules(
             vec![config::RuleInput {
                 name: "live.example".into(),
-                address: "192.0.2.10".into(),
+                record_type: config::RuleType::A,
+                address: Some("192.0.2.10".into()),
+                target: None,
                 ttl: None,
             }],
             &state.config.gui_name,

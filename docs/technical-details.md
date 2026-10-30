@@ -133,12 +133,29 @@ Foreground user rules are stored as human-readable JSON in
 `%APPDATA%\dns-shunt\rules.json` on Windows. The service instead uses the
 shared `%ProgramData%\dns-shunt\rules\rules.json` and
 `%ProgramData%\dns-shunt\config.toml` files. The browser can add, edit, and
-delete rules immediately. Exact names win; otherwise, the most-specific
-matching wildcard wins. Wildcards match subdomains but not their apex. Only
-matching A/IN queries receive synthesized responses. Nonmatching names, AAAA
-queries, other classes, malformed DNS, and unsupported messages are immediately
+delete rules immediately. Rules can be A overrides (`type: "A"`, `address`) or
+CNAME aliases (`type: "CNAME"`, `target`); legacy JSON entries containing only
+`name`, `address`, and `ttl` load as A rules. Exact names win; otherwise, the
+most-specific matching wildcard wins. Wildcards match subdomains but not their
+apex. A rules answer A/IN queries only. CNAME rules answer A, AAAA, and explicit
+CNAME/IN queries. For A lookups, DNS Shunt includes a local CNAME chain and
+terminal A record when the target matches a local A rule. For AAAA it returns
+the local CNAME chain without an AAAA record, leaving target resolution to the
+configured DNS server. Explicit CNAME questions receive only the queried
+alias's CNAME record. If a chain reaches an unruled target, DNS Shunt returns
+the known chain and does not query upstream; clients may issue a target lookup
+through the unchanged resolver path. Windows APIs and applications can differ
+in how they expose or follow a CNAME-only answer; no behavior is guaranteed for
+every caller. A rule queried for a different type,
+nonmatching names, other classes, malformed DNS, and unsupported messages are
 re-injected unchanged; unmatched traffic is neither correlated nor counted.
+CNAME chains include at most 16 CNAME records, plus a terminal A record when
+available, and are bounded by the advertised UDP payload size (capped at 1232
+bytes). If necessary, the response contains only the longest leading CNAME
+prefix that fits.
 The JSON store is validated in full before it is persisted and published.
+CNAME targets must be concrete DNS names, and configured chains that resolve
+back into a CNAME loop are rejected.
 Corrupt or unreadable stores fail startup rather than silently disabling
 overrides. Aggregate override, fail-open, and error counters, uptime, and
 per-rule hit counts cover only the current run and are not written to disk;
@@ -218,3 +235,6 @@ The WinDivert setup script validates the downloaded archive size and driver
 signature before staging its runtime files. It inspects only outbound,
 non-loopback IPv4 UDP DNS packets to port 53. IPv6, TCP/53, inbound DNS, and
 loopback traffic are outside the interception scope.
+The CNAME behavior above applies only to intercepted unicast UDP/53 traffic.
+It does not add mDNS support: `.local` multicast queries on UDP/5353 remain
+outside this path and retain their distinct link-local resolution behavior.
