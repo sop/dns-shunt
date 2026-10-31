@@ -179,21 +179,40 @@ fn process_mdns_query_packet(
         return;
     };
 
-    if captured.ip_ttl != 255 {
-        tracing::debug!("mDNS query passed through (non-local or non-unicast source)");
+    if captured.ip_ttl == 0 {
+        tracing::debug!(
+            ip_ttl = captured.ip_ttl,
+            "mDNS query passed through (zero TTL)"
+        );
         let _ = backend.forward_query(&context);
         return;
     }
 
+    if captured.ip_ttl != 255 {
+        tracing::debug!(
+            ip_ttl = captured.ip_ttl,
+            "mDNS query has non-standard TTL (allowed leniently)"
+        );
+    }
+
     if !interfaces.has_unicast_source(context.interface_index, tuple.source) {
-        tracing::debug!("mDNS query passed through (non-local or non-unicast source)");
+        tracing::debug!(
+            if_index = context.interface_index,
+            source = %tuple.source,
+            "mDNS query passed through (non-local or non-unicast source)"
+        );
         let _ = backend.forward_query(&context);
         return;
     }
 
     let is_legacy = tuple.source_port != 5353;
     if !is_legacy && (payload.len() < 2 || u16::from_be_bytes([payload[0], payload[1]]) != 0) {
-        tracing::debug!("mDNS query passed through (non-zero ID)");
+        let id = if payload.len() >= 2 {
+            u16::from_be_bytes([payload[0], payload[1]])
+        } else {
+            0
+        };
+        tracing::debug!(id, "mDNS query passed through (non-zero ID)");
         let _ = backend.forward_query(&context);
         return;
     }
@@ -265,16 +284,25 @@ fn process_mdns_observer_packet(
     };
 
     let is_eligible = if captured.ip_ttl != 255 {
+        tracing::debug!(
+            ip_ttl = captured.ip_ttl,
+            "mDNS observer packet ignored (non-255 TTL)"
+        );
         false
     } else {
         let is_multicast_dst = match tuple.destination {
             IpAddr::V4(v4) => v4 == mdns::MDNS_IPV4_ADDR,
             IpAddr::V6(v6) => v6 == mdns::MDNS_IPV6_ADDR,
         };
-        if is_multicast_dst {
+        if is_multicast_dst || interfaces.is_on_link(context.interface_index, tuple.source) {
             true
         } else {
-            interfaces.is_on_link(context.interface_index, tuple.source)
+            tracing::debug!(
+                if_index = context.interface_index,
+                source = %tuple.source,
+                "mDNS observer packet ignored (source not on-link)"
+            );
+            false
         }
     };
 
@@ -1411,7 +1439,7 @@ mod tests {
     }
 
     #[test]
-    fn mdns_bad_ttl_is_only_forwarded() {
+    fn mdns_zero_ttl_is_only_forwarded() {
         let (config, runtime) = runtime();
         replace_rules(&runtime, vec![a_rule("example.local", "192.0.2.80")]);
         let backend = Arc::new(MockBackend::default());
@@ -1419,7 +1447,40 @@ mod tests {
             let mut q_bytes = query(0, "example.local", 1, 1);
             q_bytes[2] = 0;
             q_bytes[3] = 0;
-            // TTL is 64 instead of 255
+            // TTL is 0
+            let pkt = mdns_packet(
+                5353,
+                IpAddr::V4(mdns::MDNS_IPV4_ADDR),
+                5353,
+                q_bytes,
+                0,
+                true,
+            );
+            super::process_captured_packet(
+                backend.as_ref(),
+                &config,
+                &runtime,
+                interfaces,
+                scheduler,
+                pkt,
+            );
+
+            assert_eq!(backend.forwarded.lock().unwrap().len(), 1);
+            std::thread::sleep(std::time::Duration::from_millis(30));
+            assert_eq!(backend.raw_injected.lock().unwrap().len(), 0);
+        });
+    }
+
+    #[test]
+    fn mdns_non_255_ttl_is_accepted_leniently() {
+        let (config, runtime) = runtime();
+        replace_rules(&runtime, vec![a_rule("example.local", "192.0.2.80")]);
+        let backend = Arc::new(MockBackend::default());
+        run_mdns_test(&runtime, &backend, 10, |interfaces, scheduler| {
+            let mut q_bytes = query(0, "example.local", 1, 1);
+            q_bytes[2] = 0;
+            q_bytes[3] = 0;
+            // TTL is 64 (non-standard but non-zero, accepted leniently)
             let pkt = mdns_packet(
                 5353,
                 IpAddr::V4(mdns::MDNS_IPV4_ADDR),
@@ -1439,7 +1500,8 @@ mod tests {
 
             assert_eq!(backend.forwarded.lock().unwrap().len(), 1);
             std::thread::sleep(std::time::Duration::from_millis(30));
-            assert_eq!(backend.raw_injected.lock().unwrap().len(), 0);
+            assert_eq!(backend.raw_injected.lock().unwrap().len(), 1);
+            assert_eq!(runtime.status()["overrides"], 1);
         });
     }
 
