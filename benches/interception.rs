@@ -37,9 +37,9 @@ fn bench_pass_through(iterations: usize) {
     let dns_payload = dns_query("unmatched.example", 1, 1, true);
     let small_packet = packet::build_ipv4_udp(
         packet::FlowTuple {
-            source: Ipv4Addr::new(192, 0, 2, 10),
+            source: std::net::IpAddr::V4(Ipv4Addr::new(192, 0, 2, 10)),
             source_port: 53_000,
-            destination: Ipv4Addr::new(198, 51, 100, 53),
+            destination: std::net::IpAddr::V4(Ipv4Addr::new(198, 51, 100, 53)),
             destination_port: 53,
         },
         &dns_payload,
@@ -58,9 +58,9 @@ fn bench_pass_through(iterations: usize) {
     assert!(dns::parse_query(&padded_payload).is_ok());
     let large_packet = packet::build_ipv4_udp(
         packet::FlowTuple {
-            source: Ipv4Addr::new(192, 0, 2, 10),
+            source: std::net::IpAddr::V4(Ipv4Addr::new(192, 0, 2, 10)),
             source_port: 53_000,
-            destination: Ipv4Addr::new(198, 51, 100, 53),
+            destination: std::net::IpAddr::V4(Ipv4Addr::new(198, 51, 100, 53)),
             destination_port: 53,
         },
         &padded_payload,

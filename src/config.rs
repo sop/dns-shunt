@@ -81,6 +81,11 @@ impl CompiledRules {
         self.rules.get(index)
     }
 
+    pub(crate) fn lookup_exact(&self, query_name: &str) -> Option<&Rule> {
+        let index = self.exact_names.get(query_name).copied()?;
+        self.rules.get(index)
+    }
+
     #[cfg(test)]
     fn lookup(&self, query_name: &str) -> Option<&Rule> {
         let name = query_name.trim_end_matches('.').to_ascii_lowercase();

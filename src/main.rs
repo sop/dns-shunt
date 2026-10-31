@@ -6,6 +6,12 @@ mod config;
 #[cfg(any(target_os = "windows", test))]
 mod dns;
 #[cfg(any(target_os = "windows", test))]
+mod interfaces;
+#[cfg(any(target_os = "windows", test))]
+mod mdns;
+#[cfg(any(target_os = "windows", test))]
+mod mdns_scheduler;
+#[cfg(any(target_os = "windows", test))]
 mod packet;
 #[cfg(any(target_os = "windows", test))]
 mod rules;

@@ -2,20 +2,36 @@ use crate::{
     admin::RuntimeState,
     config::{CompiledRules, Config, Rule},
     dns,
+    interfaces::InterfaceProvider,
+    mdns,
+    mdns_scheduler::{JitterProvider, MdnsScheduler},
     packet::FlowTuple,
 };
-use std::{any::Any, ops::Range, sync::Arc};
+use std::{any::Any, net::IpAddr, ops::Range, sync::Arc};
 use thiserror::Error;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PacketKind {
+    UnicastDns,
+    OutboundMdnsQuery,
+    InboundMdnsObserver,
+    Other,
+}
 
 pub struct FlowContext {
     pub tuple: Option<FlowTuple>,
     pub original_packet: Vec<u8>,
+    pub interface_index: u32,
+    #[allow(dead_code)]
+    pub outbound: bool,
     pub backend_context: Box<dyn Any + Send + Sync>,
 }
 
 pub struct CapturedPacket {
     pub context: FlowContext,
     pub dns_payload: Option<Range<usize>>,
+    pub kind: PacketKind,
+    pub ip_ttl: u8,
 }
 
 #[derive(Debug, Error)]
@@ -30,6 +46,17 @@ pub trait InterceptionBackend: Send + Sync + 'static {
         dns_payload: &[u8],
     ) -> Result<(), BackendError>;
     fn reinject_original(&self, context: FlowContext) -> Result<(), BackendError>;
+    fn forward_query(&self, _context: &FlowContext) -> Result<(), BackendError> {
+        Err(BackendError("forward_query is not supported".into()))
+    }
+    fn inject_raw_packet(
+        &self,
+        _context: &FlowContext,
+        _packet: &[u8],
+        _outbound: bool,
+    ) -> Result<(), BackendError> {
+        Err(BackendError("inject_raw_packet is not supported".into()))
+    }
     fn request_shutdown(&self) -> Result<(), BackendError> {
         Ok(())
     }
@@ -39,11 +66,17 @@ pub fn run_proxy(
     backend: Arc<dyn InterceptionBackend>,
     config: Config,
     runtime: Arc<RuntimeState>,
+    interfaces: Arc<dyn InterfaceProvider>,
+    jitter: Arc<dyn JitterProvider>,
     install_console_handler: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    let scheduler = MdnsScheduler::new(Arc::clone(&backend), Arc::clone(&runtime), jitter);
     let weak_backend = Arc::downgrade(&backend);
     let weak_runtime = Arc::downgrade(&runtime);
+    let scheduler_for_stop = Arc::clone(&scheduler);
     runtime.set_stop_callback(Arc::new(move || {
+        scheduler_for_stop.stop();
+        scheduler_for_stop.join();
         if let Some(backend) = weak_backend.upgrade()
             && let Err(error) = backend.request_shutdown()
             && let Some(runtime) = weak_runtime.upgrade()
@@ -76,16 +109,166 @@ pub fn run_proxy(
                 }
                 runtime.record_error(error.to_string());
                 runtime.stop();
+                scheduler.stop();
+                scheduler.join();
                 return Err(Box::new(error));
             }
         };
-        process_captured_packet(&*backend, &config, &runtime, captured);
+        process_captured_packet(
+            &*backend,
+            &config,
+            &runtime,
+            &*interfaces,
+            &scheduler,
+            captured,
+        );
     }
 
+    scheduler.stop();
+    scheduler.join();
     Ok(())
 }
 
 fn process_captured_packet(
+    backend: &dyn InterceptionBackend,
+    config: &Config,
+    runtime: &RuntimeState,
+    interfaces: &dyn InterfaceProvider,
+    scheduler: &MdnsScheduler,
+    captured: CapturedPacket,
+) {
+    match captured.kind {
+        PacketKind::UnicastDns => {
+            process_unicast_dns_packet(backend, config, runtime, captured);
+        }
+        PacketKind::OutboundMdnsQuery => {
+            process_mdns_query_packet(backend, runtime, interfaces, scheduler, captured);
+        }
+        PacketKind::InboundMdnsObserver => {
+            process_mdns_observer_packet(backend, runtime, interfaces, scheduler, captured);
+        }
+        PacketKind::Other => {
+            reinject_or_log(backend, captured.context, runtime);
+        }
+    }
+}
+
+fn process_mdns_query_packet(
+    backend: &dyn InterceptionBackend,
+    runtime: &RuntimeState,
+    interfaces: &dyn InterfaceProvider,
+    scheduler: &MdnsScheduler,
+    captured: CapturedPacket,
+) {
+    let context = captured.context;
+    let Some(payload_range) = captured.dns_payload else {
+        fail_open(backend, context, runtime, "invalid mDNS payload range");
+        return;
+    };
+    let Some(payload) = context.original_packet.get(payload_range) else {
+        fail_open(
+            backend,
+            context,
+            runtime,
+            "mDNS payload range out of bounds",
+        );
+        return;
+    };
+    let Some(tuple) = context.tuple else {
+        fail_open(backend, context, runtime, "missing flow tuple");
+        return;
+    };
+
+    if captured.ip_ttl != 255 {
+        let _ = backend.forward_query(&context);
+        return;
+    }
+
+    if !interfaces.has_unicast_source(context.interface_index, tuple.source) {
+        let _ = backend.forward_query(&context);
+        return;
+    }
+
+    let is_legacy = tuple.source_port != 5353;
+    if !is_legacy && (payload.len() < 2 || u16::from_be_bytes([payload[0], payload[1]]) != 0) {
+        let _ = backend.forward_query(&context);
+        return;
+    }
+
+    let query = match mdns::parse_mdns_query(payload, is_legacy) {
+        Ok(q) => q,
+        Err(mdns::MdnsError::Truncated | mdns::MdnsError::Probe | mdns::MdnsError::Unsupported) => {
+            let _ = backend.forward_query(&context);
+            return;
+        }
+        Err(mdns::MdnsError::Malformed) => {
+            fail_open(backend, context, runtime, "mDNS query malformed");
+            return;
+        }
+    };
+
+    if let Err(error) = backend.forward_query(&context) {
+        fail_open(
+            backend,
+            context,
+            runtime,
+            format!("failed to forward mDNS query: {error}"),
+        );
+        return;
+    }
+
+    let snapshot = runtime.rules.packet_snapshot();
+    let candidates = mdns::resolve_mdns_query(&snapshot, &query);
+    if candidates.is_empty() {
+        return;
+    }
+
+    scheduler.schedule(context, query, candidates);
+}
+
+fn process_mdns_observer_packet(
+    backend: &dyn InterceptionBackend,
+    runtime: &RuntimeState,
+    interfaces: &dyn InterfaceProvider,
+    scheduler: &MdnsScheduler,
+    captured: CapturedPacket,
+) {
+    let context = captured.context;
+    let Some(payload_range) = captured.dns_payload else {
+        reinject_or_log(backend, context, runtime);
+        return;
+    };
+    let Some(payload) = context.original_packet.get(payload_range) else {
+        reinject_or_log(backend, context, runtime);
+        return;
+    };
+    let Some(tuple) = context.tuple else {
+        reinject_or_log(backend, context, runtime);
+        return;
+    };
+
+    let is_eligible = if captured.ip_ttl != 255 {
+        false
+    } else {
+        let is_multicast_dst = match tuple.destination {
+            IpAddr::V4(v4) => v4 == mdns::MDNS_IPV4_ADDR,
+            IpAddr::V6(v6) => v6 == mdns::MDNS_IPV6_ADDR,
+        };
+        if is_multicast_dst {
+            true
+        } else {
+            interfaces.is_on_link(context.interface_index, tuple.source)
+        }
+    };
+
+    if is_eligible && let Ok(resp) = mdns::parse_mdns_response(payload) {
+        scheduler.observe_peer_response(context.interface_index, resp.id, &resp.answers);
+    }
+
+    reinject_or_log(backend, context, runtime);
+}
+
+fn process_unicast_dns_packet(
     backend: &dyn InterceptionBackend,
     config: &Config,
     runtime: &RuntimeState,
@@ -351,7 +534,10 @@ mod tests {
         response_attempts: AtomicUsize,
         responses: Mutex<Vec<Vec<u8>>>,
         reinjections: Mutex<Vec<Option<Vec<u8>>>>,
+        forwarded: Mutex<Vec<Vec<u8>>>,
+        raw_injected: Mutex<Vec<(Vec<u8>, bool)>>,
         fail_response: AtomicBool,
+        fail_forward: AtomicBool,
     }
 
     impl InterceptionBackend for MockBackend {
@@ -382,6 +568,63 @@ mod tests {
                 .push(Some(context.original_packet));
             Ok(())
         }
+
+        fn forward_query(&self, context: &FlowContext) -> Result<(), BackendError> {
+            if self.fail_forward.load(Ordering::Relaxed) {
+                return Err(BackendError("mock forward failure".into()));
+            }
+            self.forwarded
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .push(context.original_packet.clone());
+            Ok(())
+        }
+
+        fn inject_raw_packet(
+            &self,
+            _context: &FlowContext,
+            packet: &[u8],
+            outbound: bool,
+        ) -> Result<(), BackendError> {
+            self.raw_injected
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .push((packet.to_vec(), outbound));
+            Ok(())
+        }
+    }
+
+    fn process_captured_packet(
+        backend: &dyn InterceptionBackend,
+        config: &Config,
+        runtime: &RuntimeState,
+        captured: CapturedPacket,
+    ) {
+        let interfaces = crate::interfaces::MockInterfaceProvider::new();
+        let dummy_backend = Arc::new(MockBackend::default());
+        let dummy_runtime = RuntimeState::new(
+            config.clone(),
+            crate::rules::RuleManager::load(
+                env::temp_dir().join(format!(
+                    "dns-shunt-dummy-{}-{}",
+                    std::process::id(),
+                    TEST_PATH_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+                )),
+                config.gui_name.clone(),
+                config.ttl,
+            )
+            .unwrap(),
+            "dummy",
+        )
+        .unwrap();
+        let scheduler = crate::mdns_scheduler::MdnsScheduler::new(
+            dummy_backend,
+            dummy_runtime,
+            Arc::new(crate::mdns_scheduler::FixedJitter(20)),
+        );
+        super::process_captured_packet(backend, config, runtime, &interfaces, &scheduler, captured);
+        scheduler.stop();
+        scheduler.join();
     }
 
     fn query(id: u16, name: &str, qtype: u16, qclass: u16) -> Vec<u8> {
@@ -406,9 +649,9 @@ mod tests {
 
     fn test_tuple() -> FlowTuple {
         FlowTuple {
-            source: Ipv4Addr::new(192, 0, 2, 10),
+            source: std::net::IpAddr::V4(Ipv4Addr::new(192, 0, 2, 10)),
             source_port: 53000,
-            destination: Ipv4Addr::new(198, 51, 100, 53),
+            destination: std::net::IpAddr::V4(Ipv4Addr::new(198, 51, 100, 53)),
             destination_port: 53,
         }
     }
@@ -432,9 +675,13 @@ mod tests {
             context: FlowContext {
                 tuple: Some(tuple),
                 original_packet,
+                interface_index: 1,
+                outbound: true,
                 backend_context: Box::new(()),
             },
             dns_payload,
+            kind: PacketKind::UnicastDns,
+            ip_ttl: 64,
         }
     }
 
@@ -958,6 +1205,306 @@ mod tests {
         let records = answer_types(&backend.responses.lock().unwrap()[0]);
         assert_eq!(records.len(), 16);
         assert!(records.iter().all(|record| record.1 == 5));
+    }
+
+    fn mdns_packet(
+        source_port: u16,
+        destination_ip: IpAddr,
+        destination_port: u16,
+        payload: Vec<u8>,
+        ip_ttl: u8,
+        outbound: bool,
+    ) -> CapturedPacket {
+        let tuple = FlowTuple {
+            source: IpAddr::V4(Ipv4Addr::new(192, 0, 2, 10)),
+            source_port,
+            destination: destination_ip,
+            destination_port,
+        };
+        let original_packet =
+            crate::packet::build_ipv4_udp_with_ttl(tuple, &payload, ip_ttl).unwrap();
+        let payload_range = 28..original_packet.len();
+        let kind = if outbound {
+            if destination_port == 5353 {
+                PacketKind::OutboundMdnsQuery
+            } else {
+                PacketKind::UnicastDns
+            }
+        } else {
+            PacketKind::InboundMdnsObserver
+        };
+        CapturedPacket {
+            context: FlowContext {
+                tuple: Some(tuple),
+                original_packet,
+                interface_index: 1,
+                outbound,
+                backend_context: Box::new(()),
+            },
+            dns_payload: Some(payload_range),
+            kind,
+            ip_ttl,
+        }
+    }
+
+    fn run_mdns_test<F>(
+        runtime: &Arc<RuntimeState>,
+        backend: &Arc<MockBackend>,
+        jitter_ms: u64,
+        test_fn: F,
+    ) where
+        F: FnOnce(&dyn InterfaceProvider, &MdnsScheduler),
+    {
+        let interfaces = crate::interfaces::MockInterfaceProvider::new();
+        let mut if_data = crate::interfaces::InterfaceData::default();
+        if_data
+            .unicast_addresses
+            .push(IpAddr::V4(Ipv4Addr::new(192, 0, 2, 10)));
+        if_data.prefixes.push(crate::interfaces::SubnetPrefix::new(
+            Ipv4Addr::new(192, 0, 2, 0),
+            24,
+        ));
+        interfaces.add_interface(1, if_data);
+
+        let scheduler = MdnsScheduler::new(
+            Arc::clone(backend) as Arc<dyn InterceptionBackend>,
+            Arc::clone(runtime),
+            Arc::new(crate::mdns_scheduler::FixedJitter(jitter_ms)),
+        );
+
+        test_fn(&interfaces, &scheduler);
+
+        scheduler.stop();
+        scheduler.join();
+    }
+
+    #[test]
+    fn mdns_query_forwarded_and_answered_with_cname_and_target_a() {
+        let (config, runtime) = runtime();
+        replace_rules(
+            &runtime,
+            vec![
+                cname_rule("*.example.local", "example.local"),
+                a_rule("example.local", "192.0.2.80"),
+            ],
+        );
+        let backend = Arc::new(MockBackend::default());
+        run_mdns_test(&runtime, &backend, 10, |interfaces, scheduler| {
+            let mut q_bytes = query(0, "test.example.local", 1, 1);
+            q_bytes[2] = 0;
+            q_bytes[3] = 0;
+            let pkt = mdns_packet(
+                5353,
+                IpAddr::V4(mdns::MDNS_IPV4_ADDR),
+                5353,
+                q_bytes,
+                255,
+                true,
+            );
+            super::process_captured_packet(
+                backend.as_ref(),
+                &config,
+                &runtime,
+                interfaces,
+                scheduler,
+                pkt,
+            );
+
+            assert_eq!(backend.forwarded.lock().unwrap().len(), 1);
+
+            std::thread::sleep(std::time::Duration::from_millis(30));
+
+            let raw = backend.raw_injected.lock().unwrap();
+            assert_eq!(raw.len(), 1);
+            assert!(raw[0].1); // outbound QM
+            let (tuple, resp_payload) = crate::packet::parse_ipv4_udp(&raw[0].0).unwrap();
+            assert_eq!(tuple.destination, IpAddr::V4(mdns::MDNS_IPV4_ADDR));
+            assert_eq!(tuple.destination_port, 5353);
+
+            let info = mdns::parse_mdns_response(resp_payload).unwrap();
+            assert_eq!(info.id, 0);
+            assert_eq!(info.answers.len(), 2);
+            assert_eq!(info.answers[0].owner(), "test.example.local");
+            assert_eq!(info.answers[1].owner(), "example.local");
+
+            assert_eq!(runtime.status()["overrides"], 1);
+            let hits = runtime.statistics_snapshot()["rule_hits"].clone();
+            assert_eq!(hits["*.example.local"], 1);
+            assert_eq!(hits["example.local"], 1);
+        });
+    }
+
+    #[test]
+    fn mdns_gui_name_is_not_answered() {
+        let (config, runtime) = runtime();
+        let backend = Arc::new(MockBackend::default());
+        run_mdns_test(&runtime, &backend, 10, |interfaces, scheduler| {
+            let mut q_bytes = query(0, "dns-shunt.local", 1, 1);
+            q_bytes[2] = 0;
+            q_bytes[3] = 0;
+            let pkt = mdns_packet(
+                5353,
+                IpAddr::V4(mdns::MDNS_IPV4_ADDR),
+                5353,
+                q_bytes,
+                255,
+                true,
+            );
+            super::process_captured_packet(
+                backend.as_ref(),
+                &config,
+                &runtime,
+                interfaces,
+                scheduler,
+                pkt,
+            );
+
+            assert_eq!(backend.forwarded.lock().unwrap().len(), 1);
+            std::thread::sleep(std::time::Duration::from_millis(30));
+            assert_eq!(backend.raw_injected.lock().unwrap().len(), 0);
+            assert_eq!(runtime.status()["overrides"], 0);
+        });
+    }
+
+    #[test]
+    fn mdns_bad_ttl_is_only_forwarded() {
+        let (config, runtime) = runtime();
+        replace_rules(&runtime, vec![a_rule("example.local", "192.0.2.80")]);
+        let backend = Arc::new(MockBackend::default());
+        run_mdns_test(&runtime, &backend, 10, |interfaces, scheduler| {
+            let mut q_bytes = query(0, "example.local", 1, 1);
+            q_bytes[2] = 0;
+            q_bytes[3] = 0;
+            // TTL is 64 instead of 255
+            let pkt = mdns_packet(
+                5353,
+                IpAddr::V4(mdns::MDNS_IPV4_ADDR),
+                5353,
+                q_bytes,
+                64,
+                true,
+            );
+            super::process_captured_packet(
+                backend.as_ref(),
+                &config,
+                &runtime,
+                interfaces,
+                scheduler,
+                pkt,
+            );
+
+            assert_eq!(backend.forwarded.lock().unwrap().len(), 1);
+            std::thread::sleep(std::time::Duration::from_millis(30));
+            assert_eq!(backend.raw_injected.lock().unwrap().len(), 0);
+        });
+    }
+
+    #[test]
+    fn mdns_peer_answer_suppression_and_observer_reinjection() {
+        let (config, runtime) = runtime();
+        replace_rules(&runtime, vec![a_rule("example.local", "192.0.2.80")]);
+        let backend = Arc::new(MockBackend::default());
+        run_mdns_test(&runtime, &backend, 60, |interfaces, scheduler| {
+            let mut q_bytes = query(0, "example.local", 1, 1);
+            q_bytes[2] = 0;
+            q_bytes[3] = 0;
+            let pkt = mdns_packet(
+                5353,
+                IpAddr::V4(mdns::MDNS_IPV4_ADDR),
+                5353,
+                q_bytes,
+                255,
+                true,
+            );
+            super::process_captured_packet(
+                backend.as_ref(),
+                &config,
+                &runtime,
+                interfaces,
+                scheduler,
+                pkt,
+            );
+
+            assert_eq!(backend.forwarded.lock().unwrap().len(), 1);
+
+            // Inbound response arrives during delay
+            let peer_record = mdns::MdnsRecord::A {
+                owner: "example.local".into(),
+                address: Ipv4Addr::new(192, 0, 2, 80),
+                ttl: 60,
+            };
+            let resp_bytes = mdns::build_native_response(&[&peer_record]).unwrap();
+            let obs_pkt = mdns_packet(
+                5353,
+                IpAddr::V4(Ipv4Addr::new(192, 0, 2, 10)),
+                5353,
+                resp_bytes,
+                255,
+                false,
+            );
+            super::process_captured_packet(
+                backend.as_ref(),
+                &config,
+                &runtime,
+                interfaces,
+                scheduler,
+                obs_pkt,
+            );
+
+            // Observer reinjected immediately byte-for-byte
+            assert_eq!(backend.reinjections.lock().unwrap().len(), 1);
+
+            std::thread::sleep(std::time::Duration::from_millis(80));
+
+            // Scheduled send was suppressed!
+            assert_eq!(backend.raw_injected.lock().unwrap().len(), 0);
+            assert_eq!(runtime.status()["overrides"], 0);
+        });
+    }
+
+    #[test]
+    fn mdns_legacy_query_echoes_id_and_questions() {
+        let (config, runtime) = runtime();
+        replace_rules(&runtime, vec![a_rule("example.local", "192.0.2.80")]);
+        let backend = Arc::new(MockBackend::default());
+        run_mdns_test(&runtime, &backend, 10, |interfaces, scheduler| {
+            let mut q_bytes = query(0x4321, "example.local", 1, 1);
+            q_bytes[2] = 0;
+            q_bytes[3] = 0;
+            let pkt = mdns_packet(
+                54321,
+                IpAddr::V4(mdns::MDNS_IPV4_ADDR),
+                5353,
+                q_bytes,
+                255,
+                true,
+            );
+            super::process_captured_packet(
+                backend.as_ref(),
+                &config,
+                &runtime,
+                interfaces,
+                scheduler,
+                pkt,
+            );
+
+            assert_eq!(backend.forwarded.lock().unwrap().len(), 1);
+
+            std::thread::sleep(std::time::Duration::from_millis(30));
+
+            let raw = backend.raw_injected.lock().unwrap();
+            assert_eq!(raw.len(), 1);
+            assert!(!raw[0].1); // inbound unicast
+            let (tuple, resp_payload) = crate::packet::parse_ipv4_udp(&raw[0].0).unwrap();
+            assert_eq!(tuple.destination, IpAddr::V4(Ipv4Addr::new(192, 0, 2, 10)));
+            assert_eq!(tuple.destination_port, 54321);
+
+            let info = mdns::parse_mdns_response(resp_payload).unwrap();
+            assert_eq!(info.id, 0x4321);
+            assert_eq!(info.answers.len(), 1);
+            assert!(info.answers[0].ttl() <= 10);
+            assert_eq!(runtime.status()["overrides"], 1);
+        });
     }
 
     #[test]
