@@ -360,6 +360,12 @@ impl MdnsScheduler {
                     }
                     let rules: Vec<&Rule> = qm_items.iter().map(|i| &i.rule).collect();
                     self.runtime.record_synthesized(&rules, false);
+                    let response_names: Vec<&str> =
+                        qm_items.iter().map(|i| i.record.owner()).collect();
+                    tracing::debug!(
+                        names = ?response_names,
+                        "injected scheduled mDNS response packet"
+                    );
                 }
             }
         }
@@ -381,6 +387,12 @@ impl MdnsScheduler {
                 {
                     let rules: Vec<&Rule> = qu_items.iter().map(|i| &i.rule).collect();
                     self.runtime.record_synthesized(&rules, false);
+                    let response_names: Vec<&str> =
+                        qu_items.iter().map(|i| i.record.owner()).collect();
+                    tracing::debug!(
+                        names = ?response_names,
+                        "injected scheduled mDNS response packet"
+                    );
                 }
             }
         }
@@ -420,6 +432,12 @@ impl MdnsScheduler {
             {
                 let rules: Vec<&Rule> = legacy_items.iter().map(|i| &i.rule).collect();
                 self.runtime.record_synthesized(&rules, false);
+                let response_names: Vec<&str> =
+                    legacy_items.iter().map(|i| i.record.owner()).collect();
+                tracing::debug!(
+                    names = ?response_names,
+                    "injected scheduled mDNS response packet"
+                );
             }
         }
     }

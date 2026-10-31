@@ -511,6 +511,7 @@ fn prepare_service_data() -> Result<(), Box<dyn Error>> {
     let paths = service_paths()?;
     let data_dir = paths.config.parent().ok_or("invalid ProgramData path")?;
     fs::create_dir_all(data_dir)?;
+    fs::create_dir_all(&paths.log_dir)?;
 
     set_path_security_owned(data_dir, PROGRAM_DATA_SDDL, "BA")?;
 
@@ -986,10 +987,12 @@ pub fn attach_runtime(runtime: &Arc<RuntimeState>) {
 }
 
 pub fn log_error(message: &str) {
+    tracing::error!("{message}");
     log_event(EVENTLOG_ERROR_TYPE, 0x1001, message);
 }
 
 fn log_information(message: &str) {
+    tracing::info!("{message}");
     log_event(EVENTLOG_INFORMATION_TYPE, 0x1000, message);
 }
 
@@ -1038,6 +1041,42 @@ unsafe extern "system" fn service_main(_argc: u32, _argv: *mut PWSTR) {
             return;
         }
     };
+
+    let (paths, config) = match service_paths() {
+        Ok(paths) => {
+            let config = crate::config::Config::load(&paths.config).ok();
+            (Some(paths), config)
+        }
+        Err(_) => (None, None),
+    };
+    let log_dir = config
+        .as_ref()
+        .and_then(|c| c.log_dir.clone())
+        .or_else(|| paths.as_ref().map(|p| p.log_dir.clone()))
+        .unwrap_or_else(|| PathBuf::from(r"C:\ProgramData\dns-shunt\logs"));
+    let log_level = config
+        .as_ref()
+        .map(|c| c.log_level.as_str())
+        .unwrap_or("info");
+    let retention_days = config
+        .as_ref()
+        .map(|c| c.log_retention_days)
+        .unwrap_or(crate::config::DEFAULT_LOG_RETENTION_DAYS);
+
+    let _guard = match crate::logging::init_service(log_level, &log_dir) {
+        Ok(guard) => Some(guard),
+        Err(error) => {
+            log_error(&format!(
+                "could not initialize service file logger: {error}"
+            ));
+            None
+        }
+    };
+
+    let pruner_stop = Arc::new(AtomicBool::new(false));
+    let pruner_thread =
+        crate::logging::spawn_log_pruner(log_dir, retention_days, Arc::clone(&pruner_stop));
+
     STATUS_HANDLE.store(status_handle.0 as isize, Ordering::Release);
     report_status(SERVICE_START_PENDING, 0, 0);
     log_information("service startup requested");
@@ -1051,6 +1090,10 @@ unsafe extern "system" fn service_main(_argc: u32, _argv: *mut PWSTR) {
             log_error(&format!("service startup or runtime failed: {error}"));
             report_status(SERVICE_STOPPED, ERROR_SERVICE_SPECIFIC_ERROR.0, 1);
         }
+    }
+    pruner_stop.store(true, Ordering::Release);
+    if let Some(handle) = pruner_thread {
+        let _ = handle.join();
     }
     STATUS_HANDLE.store(0, Ordering::Release);
     *RUNTIME

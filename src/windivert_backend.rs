@@ -77,6 +77,7 @@ impl WinDivertDriver {
         if handle == INVALID_HANDLE_VALUE {
             return Err(io::Error::last_os_error().into());
         }
+        tracing::info!("opened WinDivert handle");
         Ok(Self { handle })
     }
 
@@ -119,6 +120,7 @@ impl WinDivertDriver {
     }
 
     fn shutdown_receive(&self) -> Result<(), io::Error> {
+        tracing::info!("shutting down WinDivert receive");
         let result = unsafe { WinDivertShutdown(self.handle, WinDivertShutdownMode::Recv) };
         if !result.as_bool() {
             return Err(io::Error::last_os_error());
@@ -210,6 +212,15 @@ impl InterceptionBackend for WinDivertBackend {
             state,
         };
 
+        tracing::trace!(
+            packet_length,
+            ?tuple,
+            outbound,
+            if_index,
+            ?kind,
+            "WinDivert packet captured"
+        );
+
         Ok(CapturedPacket {
             context: FlowContext {
                 tuple,
@@ -235,6 +246,12 @@ impl InterceptionBackend for WinDivertBackend {
             .ok_or_else(|| BackendError("response context has no IPv4/UDP tuple".into()))?;
         let response = packet::build_ipv4_udp(packet::response_tuple(tuple), dns_payload)
             .map_err(|error| BackendError(error.to_string()))?;
+
+        tracing::debug!(
+            ?tuple,
+            len = dns_payload.len(),
+            "WinDivert injecting DNS response"
+        );
 
         {
             let mut state = captured.state.lock().unwrap();
@@ -305,6 +322,11 @@ impl InterceptionBackend for WinDivertBackend {
 
         let mut packet = unsafe { WinDivertPacket::<NetworkLayer>::new(original_packet) };
         packet.address = captured.address.clone();
+        tracing::trace!(
+            ?tuple,
+            len = packet.data.len(),
+            "WinDivert reinjecting original packet"
+        );
         self.driver
             .send(&packet)
             .map_err(|error| BackendError(error.to_string()))?;
@@ -332,6 +354,7 @@ impl InterceptionBackend for WinDivertBackend {
         let mut packet =
             unsafe { WinDivertPacket::<NetworkLayer>::new(context.original_packet.clone()) };
         packet.address = captured.address.clone();
+        tracing::trace!(?context.tuple, "WinDivert forwarding original mDNS query");
         self.driver
             .send(&packet)
             .map_err(|error| BackendError(error.to_string()))?;
@@ -380,6 +403,12 @@ impl InterceptionBackend for WinDivertBackend {
         let mut packet = unsafe { WinDivertPacket::<NetworkLayer>::new(raw_packet.to_vec()) };
         packet.address = captured.address.clone();
         packet.address.set_outbound(outbound);
+        tracing::debug!(
+            ?context.tuple,
+            outbound,
+            len = raw_packet.len(),
+            "WinDivert injecting raw packet"
+        );
         packet.address.set_impostor(true);
         packet
             .recalculate_checksums(ChecksumFlags::new())

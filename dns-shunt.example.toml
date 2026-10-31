@@ -6,3 +6,16 @@ gui_name = "dns-shunt.local"
 
 # Loopback-only HTTP admin listener port.
 gui_port = 53080
+
+# Logging verbosity: "trace", "debug", "info", "warn", or "error".
+# Defaults to "info". Overridden by RUST_LOG env var or --log-level CLI flag.
+# log_level = "info"
+
+# Directory for daily rolling log files in service mode.
+# Defaults to %ProgramData%\dns-shunt\logs when omitted.
+# log_dir = "C:\\ProgramData\\dns-shunt\\logs"
+
+# Number of days to retain service log files before automatic pruning.
+# Defaults to 7 days. Set to 0 to disable automated log pruning.
+# log_retention_days = 7
+

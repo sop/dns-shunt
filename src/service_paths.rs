@@ -10,6 +10,7 @@ pub struct ServicePaths {
     pub rules: PathBuf,
     pub rules_dir: PathBuf,
     pub legacy_rules: PathBuf,
+    pub log_dir: PathBuf,
 }
 
 pub fn paths_under(program_data: &Path) -> ServicePaths {
@@ -20,6 +21,7 @@ pub fn paths_under(program_data: &Path) -> ServicePaths {
         rules: rules_dir.join("rules.json"),
         rules_dir,
         legacy_rules: root.join("rules.json"),
+        log_dir: root.join("logs"),
     }
 }
 
@@ -113,5 +115,31 @@ mod tests {
         assert_eq!(fs::read(&paths.legacy_rules).unwrap(), b"legacy");
         assert_eq!(fs::read(&paths.rules).unwrap(), b"current");
         fs::remove_dir_all(paths.legacy_rules.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn paths_under_sets_expected_locations() {
+        let base = Path::new(r"C:\ProgramData");
+        let paths = paths_under(base);
+        assert_eq!(
+            paths.config,
+            PathBuf::from(r"C:\ProgramData\dns-shunt\config.toml")
+        );
+        assert_eq!(
+            paths.rules,
+            PathBuf::from(r"C:\ProgramData\dns-shunt\rules\rules.json")
+        );
+        assert_eq!(
+            paths.rules_dir,
+            PathBuf::from(r"C:\ProgramData\dns-shunt\rules")
+        );
+        assert_eq!(
+            paths.legacy_rules,
+            PathBuf::from(r"C:\ProgramData\dns-shunt\rules.json")
+        );
+        assert_eq!(
+            paths.log_dir,
+            PathBuf::from(r"C:\ProgramData\dns-shunt\logs")
+        );
     }
 }

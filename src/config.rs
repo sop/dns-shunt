@@ -3,7 +3,7 @@ use std::{
     collections::{HashMap, HashSet},
     fs,
     net::Ipv4Addr,
-    path::Path,
+    path::{Path, PathBuf},
     str::FromStr,
 };
 use thiserror::Error;
@@ -11,6 +11,8 @@ use thiserror::Error;
 const DEFAULT_TTL: u32 = 60;
 pub const DEFAULT_GUI_NAME: &str = "dns-shunt.local";
 pub const DEFAULT_GUI_PORT: u16 = 53080;
+pub const DEFAULT_LOG_LEVEL: &str = "info";
+pub const DEFAULT_LOG_RETENTION_DAYS: u32 = 7;
 
 #[derive(Debug, Clone)]
 #[cfg_attr(not(any(target_os = "windows", test)), allow(dead_code))]
@@ -19,6 +21,9 @@ pub struct Config {
     pub gui_name: String,
     #[cfg_attr(not(any(target_os = "windows", test)), allow(dead_code))]
     pub gui_port: u16,
+    pub log_level: String,
+    pub log_dir: Option<PathBuf>,
+    pub log_retention_days: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -114,6 +119,12 @@ struct RawConfig {
     gui_name: String,
     #[serde(default = "default_gui_port")]
     gui_port: u16,
+    #[serde(default = "default_log_level")]
+    log_level: String,
+    #[serde(default)]
+    log_dir: Option<PathBuf>,
+    #[serde(default = "default_log_retention_days")]
+    log_retention_days: u32,
 }
 
 #[derive(Debug, Error)]
@@ -128,6 +139,8 @@ pub enum ConfigError {
     GuiName(String),
     #[error("GUI HTTP port cannot be zero")]
     GuiPort,
+    #[error("invalid log level: {0}")]
+    InvalidLogLevel(String),
     #[error("invalid rule address for {0}")]
     RuleAddress(String),
     #[error("invalid CNAME target for {0}")]
@@ -158,10 +171,16 @@ impl Config {
             return Err(ConfigError::GuiPort);
         }
 
+        let log_level = raw.log_level.trim().to_ascii_lowercase();
+        validate_log_level(&log_level).map_err(|_| ConfigError::InvalidLogLevel(raw.log_level))?;
+
         Ok(Self {
             ttl: raw.ttl,
             gui_name,
             gui_port: raw.gui_port,
+            log_level,
+            log_dir: raw.log_dir,
+            log_retention_days: raw.log_retention_days,
         })
     }
 
@@ -354,6 +373,19 @@ fn default_gui_name() -> String {
 const fn default_gui_port() -> u16 {
     DEFAULT_GUI_PORT
 }
+fn default_log_level() -> String {
+    DEFAULT_LOG_LEVEL.to_owned()
+}
+const fn default_log_retention_days() -> u32 {
+    DEFAULT_LOG_RETENTION_DAYS
+}
+
+fn validate_log_level(level: &str) -> Result<(), ()> {
+    match level {
+        "trace" | "debug" | "info" | "warn" | "error" => Ok(()),
+        _ => Err(()),
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -396,6 +428,9 @@ mod tests {
         assert_eq!(config.ttl, 120);
         assert_eq!(config.gui_name, DEFAULT_GUI_NAME);
         assert_eq!(config.gui_port, DEFAULT_GUI_PORT);
+        assert_eq!(config.log_level, "info");
+        assert_eq!(config.log_dir, None);
+        assert_eq!(config.log_retention_days, 7);
         assert_eq!(
             Config::parse(&format!(
                 "{BASE}\ngui_name = \"Admin.Example.\"\ngui_port = 9090\n"
@@ -404,6 +439,29 @@ mod tests {
             .gui_name,
             "admin.example"
         );
+    }
+
+    #[test]
+    fn parses_custom_logging_configuration() {
+        let text = r#"
+ttl = 120
+log_level = "DEBUG"
+log_dir = "C:\\CustomLogs"
+log_retention_days = 14
+"#;
+        let config = Config::parse(text).unwrap();
+        assert_eq!(config.log_level, "debug");
+        assert_eq!(config.log_dir, Some(PathBuf::from(r"C:\CustomLogs")));
+        assert_eq!(config.log_retention_days, 14);
+    }
+
+    #[test]
+    fn rejects_invalid_log_level() {
+        let text = "log_level = \"verbose\"\n";
+        match Config::parse(text) {
+            Err(ConfigError::InvalidLogLevel(lvl)) => assert_eq!(lvl, "verbose"),
+            other => panic!("expected InvalidLogLevel, got {other:?}"),
+        }
     }
 
     #[test]

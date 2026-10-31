@@ -180,24 +180,32 @@ fn process_mdns_query_packet(
     };
 
     if captured.ip_ttl != 255 {
+        tracing::debug!("mDNS query passed through (non-local or non-unicast source)");
         let _ = backend.forward_query(&context);
         return;
     }
 
     if !interfaces.has_unicast_source(context.interface_index, tuple.source) {
+        tracing::debug!("mDNS query passed through (non-local or non-unicast source)");
         let _ = backend.forward_query(&context);
         return;
     }
 
     let is_legacy = tuple.source_port != 5353;
     if !is_legacy && (payload.len() < 2 || u16::from_be_bytes([payload[0], payload[1]]) != 0) {
+        tracing::debug!("mDNS query passed through (non-zero ID)");
         let _ = backend.forward_query(&context);
         return;
     }
 
     let query = match mdns::parse_mdns_query(payload, is_legacy) {
         Ok(q) => q,
-        Err(mdns::MdnsError::Truncated | mdns::MdnsError::Probe | mdns::MdnsError::Unsupported) => {
+        Err(
+            err @ (mdns::MdnsError::Truncated
+            | mdns::MdnsError::Probe
+            | mdns::MdnsError::Unsupported),
+        ) => {
+            tracing::debug!(reason = ?err, "mDNS query passed through (forwarded)");
             let _ = backend.forward_query(&context);
             return;
         }
@@ -220,9 +228,18 @@ fn process_mdns_query_packet(
     let snapshot = runtime.rules.packet_snapshot();
     let candidates = mdns::resolve_mdns_query(&snapshot, &query);
     if candidates.is_empty() {
+        tracing::debug!(
+            questions = ?query.questions,
+            "mDNS query passed through (no matching local rules)"
+        );
         return;
     }
 
+    tracing::debug!(
+        questions = ?query.questions,
+        candidates = candidates.len(),
+        "mDNS query handled (scheduled local response)"
+    );
     scheduler.schedule(context, query, candidates);
 }
 
@@ -262,6 +279,7 @@ fn process_mdns_observer_packet(
     };
 
     if is_eligible && let Ok(resp) = mdns::parse_mdns_response(payload) {
+        tracing::debug!("mDNS peer response observed, passed through");
         scheduler.observe_peer_response(context.interface_index, resp.id, &resp.answers);
     }
 
@@ -296,10 +314,12 @@ fn process_unicast_dns_packet(
     let question = match dns::classify_query(payload) {
         Ok(dns::QueryClassification::Eligible(question)) => question,
         Ok(dns::QueryClassification::UnsupportedQuestion) => {
+            tracing::debug!("DNS query passed through (unsupported query type or class)");
             reinject_or_log(backend, context, runtime);
             return;
         }
         Err(error) => {
+            tracing::warn!(%error, "DNS query parsing failed, passed through");
             fail_open(
                 backend,
                 context,
@@ -312,6 +332,11 @@ fn process_unicast_dns_packet(
     let snapshot = runtime.rules.packet_snapshot();
     let Some(matched_override) = lookup_override(&snapshot, &config.gui_name, &question.name)
     else {
+        tracing::debug!(
+            qname = %question.name,
+            qtype = question.qtype,
+            "DNS query passed through (no matching rule)"
+        );
         reinject_or_log(backend, context, runtime);
         return;
     };
@@ -326,11 +351,21 @@ fn process_unicast_dns_packet(
             true,
         ),
         OverrideMatch::Builtin => {
+            tracing::debug!(
+                qname = %question.name,
+                qtype = question.qtype,
+                "DNS query passed through (record type mismatch)"
+            );
             reinject_or_log(backend, context, runtime);
             return;
         }
         OverrideMatch::Rule(rule) if rule.record_type == crate::config::RuleType::A => {
             if question.qtype != 1 {
+                tracing::debug!(
+                    qname = %question.name,
+                    qtype = question.qtype,
+                    "DNS query passed through (record type mismatch)"
+                );
                 reinject_or_log(backend, context, runtime);
                 return;
             }
@@ -400,6 +435,12 @@ fn process_unicast_dns_packet(
         );
         return;
     }
+    tracing::debug!(
+        qname = %question.name,
+        qtype = question.qtype,
+        answers = answer_count,
+        "DNS query handled (injected override response)"
+    );
     let retained_rules = &contributing_rules[..answer_count.min(contributing_rules.len())];
     runtime.record_synthesized(
         retained_rules,
@@ -497,6 +538,8 @@ fn fail_open(
     runtime: &RuntimeState,
     error: impl Into<String>,
 ) {
+    let error = error.into();
+    tracing::warn!(%error, "fail-open triggered");
     runtime.record_error(error);
     runtime.record_fail_open();
     reinject_or_log(backend, context, runtime);
@@ -508,6 +551,7 @@ fn reinject_or_log(
     runtime: &RuntimeState,
 ) {
     if let Err(error) = backend.reinject_original(context) {
+        tracing::error!(%error, "failed to reinject original packet");
         runtime.record_error(error.to_string());
         runtime.record_fail_open();
     }

@@ -92,12 +92,28 @@ Start with [`dns-shunt.example.toml`](../dns-shunt.example.toml):
 ttl = 60
 gui_name = "dns-shunt.local"
 gui_port = 53080
+log_level = "info"
+log_dir = "C:\\ProgramData\\dns-shunt\\logs"
+log_retention_days = 7
 ```
 
 `ttl` is the default for web-managed rules. `gui_name` defaults to
 `dns-shunt.local` and is a reserved built-in exact override to `127.0.0.1`;
-`gui_port` defaults to `53080` and is the local HTTP listener port. Rules are
-not loaded from TOML. Legacy `[[rules]]` entries are ignored and are neither
+`gui_port` defaults to `53080` and is the local HTTP listener port.
+`log_level` specifies the minimum logging verbosity (`trace`, `debug`, `info`,
+`warn`, or `error`), defaulting to `info`.
+`log_dir` optionally overrides the directory for rolling log files in service
+mode (defaults to `%ProgramData%\dns-shunt\logs`).
+`log_retention_days` controls automated log pruning in service mode, defaulting
+to 7 days (`0` disables pruning).
+
+The effective log level follows the precedence order:
+CLI argument (`--log-level <LEVEL>` or `-l <LEVEL>`) >
+`RUST_LOG` environment variable >
+`config.toml` (`log_level`) >
+default (`info`).
+
+Rules are not loaded from TOML. Legacy `[[rules]]` entries are ignored and are neither
 imported nor activated. Older `upstream` and `source_port` keys are also
 ignored and have no runtime effect.
 
@@ -198,6 +214,15 @@ both executables, the signed WinDivert runtime, and example configuration under
 Get-Service DnsShunt
 Get-WinEvent -FilterHashtable @{ LogName = 'Application'; ProviderName = 'Dns-Shunt' }
 ```
+
+Detailed operational logs are stored in daily rolling files under
+`%ProgramData%\dns-shunt\logs\dns-shunt.log.<YYYY-MM-DD>`. File logs exclude
+ANSI escape sequences and are automatically pruned according to
+`log_retention_days` (defaulting to 7 days). Setting `log_level = "debug"`
+enables structured packet disposition logging, recording whether each
+intercepted DNS or mDNS query was handled or passed through and the reason.
+Critical service lifecycle transitions and unhandled errors continue to report
+to the Windows Event Log alongside file logging.
 
 The dashboard remains unauthenticated and loopback-only as described above.
 Any local user or process can view the loopback dashboard and change its rules

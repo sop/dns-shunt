@@ -434,6 +434,11 @@ fn handle_connection(mut stream: TcpStream, runtime: &Arc<RuntimeState>) -> Resu
             );
         }
     };
+    tracing::debug!(
+        method = %request.method,
+        uri = %request.path,
+        "admin HTTP request"
+    );
     if let Err((status, error, code)) = authorize(&request, runtime) {
         let body = match code {
             Some(code) => json!({"error": error, "code": code}),
@@ -645,6 +650,7 @@ fn route(request: &HttpRequest, runtime: &RuntimeState) -> Result<(u16, Value), 
                 })
                 .map_err(store_error)?;
             runtime.notify_rules_changed();
+            tracing::info!(rule_count = result.len(), "persisted updated rules");
             Ok((201, json!({"rules": result.len()})))
         }
         ("PUT", "/api/rules") => {
@@ -661,6 +667,7 @@ fn route(request: &HttpRequest, runtime: &RuntimeState) -> Result<(u16, Value), 
                 })
                 .map_err(store_error)?;
             runtime.notify_rules_changed();
+            tracing::info!(rule_count = result.len(), "persisted updated rules");
             Ok((200, json!({"rules": result.len()})))
         }
         ("DELETE", path) if path.starts_with("/api/rules/") => {
@@ -680,6 +687,7 @@ fn route(request: &HttpRequest, runtime: &RuntimeState) -> Result<(u16, Value), 
                 })
                 .map_err(store_error)?;
             runtime.notify_rules_changed();
+            tracing::info!(rule_count = result.len(), "persisted updated rules");
             Ok((200, json!({"rules": result.len()})))
         }
         _ => Err((404, "not found".into())),
@@ -734,6 +742,7 @@ fn authorize(
             .unwrap_or(""),
         runtime,
     ) {
+        tracing::warn!(host = ?request.headers.get("host"), "unauthorized admin Host header");
         return Err((403, "invalid Host header", None));
     }
     if matches!(request.method.as_str(), "POST" | "PUT" | "DELETE")

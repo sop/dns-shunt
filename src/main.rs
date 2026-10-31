@@ -7,6 +7,7 @@ mod config;
 mod dns;
 #[cfg(any(target_os = "windows", test))]
 mod interfaces;
+mod logging;
 #[cfg(any(target_os = "windows", test))]
 mod mdns;
 #[cfg(any(target_os = "windows", test))]
@@ -72,13 +73,16 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
 
     let config_path = config_path.ok_or("--config is required; use --help")?;
     let config = config::Config::load(&config_path)?;
-    println!(
-        "validated override configuration, admin name {}",
-        config.gui_name
+    let effective_log_level =
+        logging::resolve_log_level(arguments.log_level.as_deref(), Some(&config.log_level));
+    let _ = logging::init_foreground(Some(&effective_log_level));
+    tracing::info!(
+        admin_name = %config.gui_name,
+        "validated override configuration"
     );
 
     if !enable_capture {
-        println!("capture is disabled; pass --run to enable the interception backend");
+        tracing::info!("capture is disabled; pass --run to enable the interception backend");
         return Ok(());
     }
 
@@ -100,6 +104,7 @@ struct Arguments {
     enable_capture: bool,
     service_mode: bool,
     service_command: Option<ServiceCommand>,
+    log_level: Option<String>,
     help: bool,
     version: bool,
 }
@@ -124,6 +129,7 @@ fn parse_arguments(
     let mut service_mode = false;
     let mut service_command = None;
     let mut service_command_count = 0;
+    let mut log_level = None;
     let mut help = false;
     let mut version = false;
     let mut args = args.into_iter();
@@ -136,6 +142,10 @@ fn parse_arguments(
             }
             "--run" => enable_capture = true,
             "--service" => service_mode = true,
+            "--log-level" | "-l" => {
+                let level = args.next().ok_or("--log-level requires a level")?;
+                log_level = Some(level);
+            }
             "--start-service" => {
                 service_command = Some(ServiceCommand::Start);
                 service_command_count += 1;
@@ -177,14 +187,23 @@ fn parse_arguments(
     if service_command_count > 1 {
         return Err("only one service-management command may be specified".into());
     }
-    if service_mode && (config_path.is_some() || enable_capture || has_management_command) {
+    if service_mode
+        && (config_path.is_some()
+            || enable_capture
+            || has_management_command
+            || log_level.is_some())
+    {
         return Err("--service cannot be combined with other options".into());
     }
-    if has_management_command && (config_path.is_some() || enable_capture) {
+    if has_management_command && (config_path.is_some() || enable_capture || log_level.is_some()) {
         return Err("service-management commands cannot be combined with other options".into());
     }
     if version
-        && (config_path.is_some() || enable_capture || service_mode || has_management_command)
+        && (config_path.is_some()
+            || enable_capture
+            || service_mode
+            || has_management_command
+            || log_level.is_some())
     {
         return Err("--version cannot be combined with other options".into());
     }
@@ -193,6 +212,7 @@ fn parse_arguments(
         enable_capture,
         service_mode,
         service_command,
+        log_level,
         help,
         version,
     })
@@ -228,9 +248,9 @@ fn run_capture(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let rules = rules::RuleManager::load(rules_path, config.gui_name.clone(), config.ttl)?;
     if console_mode {
-        println!(
-            "loaded {} web-managed override rule(s)",
-            rules.snapshot().len()
+        tracing::info!(
+            rules_count = rules.snapshot().len(),
+            "loaded web-managed override rule(s)"
         );
     }
     let runtime = admin::RuntimeState::new(config.clone(), rules, "WinDivert")?;
@@ -240,9 +260,9 @@ fn run_capture(
     }
     let server = admin::AdminServer::bind(&runtime)?;
     if console_mode {
-        println!(
-            "admin interface: http://{}:{}",
-            config.gui_name, config.gui_port
+        tracing::info!(
+            url = %format!("http://{}:{}", config.gui_name, config.gui_port),
+            "admin interface available"
         );
     }
     let result = windivert_backend::run(config, runtime.clone(), console_mode);
@@ -255,7 +275,7 @@ fn run_capture(
 
 fn print_help() {
     println!(concat!(
-        "dns-shunt --config <path> [--run]\n",
+        "dns-shunt --config <path> [--run] [--log-level <level>]\n",
         "dns-shunt --version\n",
         "dns-shunt --service (Windows Service Control Manager only)\n\n",
         "dns-shunt --start-service | --stop-service | ",
@@ -284,6 +304,44 @@ mod tests {
                 "--service".to_owned(),
                 "--config".to_owned(),
                 "config.toml".to_owned(),
+            ])
+            .is_err()
+        );
+        assert!(
+            parse_arguments([
+                "--service".to_owned(),
+                "--log-level".to_owned(),
+                "debug".to_owned()
+            ])
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn parses_log_level_flag() {
+        let args = parse_arguments([
+            "--config".to_owned(),
+            "config.toml".to_owned(),
+            "--log-level".to_owned(),
+            "debug".to_owned(),
+        ])
+        .unwrap();
+        assert_eq!(args.log_level.as_deref(), Some("debug"));
+
+        let args = parse_arguments([
+            "--config".to_owned(),
+            "config.toml".to_owned(),
+            "-l".to_owned(),
+            "trace".to_owned(),
+        ])
+        .unwrap();
+        assert_eq!(args.log_level.as_deref(), Some("trace"));
+
+        assert!(
+            parse_arguments([
+                "--config".to_owned(),
+                "config.toml".to_owned(),
+                "--log-level".to_owned(),
             ])
             .is_err()
         );

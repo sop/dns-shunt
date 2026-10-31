@@ -55,6 +55,7 @@ impl RuleManager {
         if stored_value.as_ref() != Some(&serde_json::to_value(&canonical_inputs)?) {
             let _ = persist(&path, &canonical_inputs);
         }
+        tracing::debug!(count = rules.len(), "loaded rules snapshot from disk");
         Ok(Self {
             path,
             reserved_name,
