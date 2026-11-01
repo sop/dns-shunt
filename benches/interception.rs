@@ -137,7 +137,7 @@ fn bench_supported_query_classification(iterations: usize) {
         config::validate_rules(
             vec![config::RuleInput {
                 name: "assets.example".into(),
-                record_type: config::RuleType::A,
+                record_type: Some(config::RuleType::A),
                 address: Some("192.0.2.1".into()),
                 target: None,
                 ttl: Some(60),
@@ -179,7 +179,7 @@ fn bench_rule_lookup(iterations: usize) {
         let inputs = (0..count)
             .map(|index| config::RuleInput {
                 name: format!("host{index:05}.example.test"),
-                record_type: config::RuleType::A,
+                record_type: Some(config::RuleType::A),
                 address: Some("192.0.2.1".into()),
                 target: None,
                 ttl: Some(60),
@@ -209,7 +209,7 @@ fn bench_snapshot_clone() {
         let inputs = (0..count)
             .map(|index| config::RuleInput {
                 name: format!("host{index:05}.example.test"),
-                record_type: config::RuleType::A,
+                record_type: Some(config::RuleType::A),
                 address: Some("192.0.2.1".into()),
                 target: None,
                 ttl: Some(60),

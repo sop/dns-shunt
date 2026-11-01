@@ -296,7 +296,7 @@ fn process_unicast_dns_packet(
         }
     };
     let snapshot = runtime.rules.packet_snapshot();
-    let Some(rule) = snapshot.lookup_normalized(&question.name) else {
+    let Some(rule) = snapshot.lookup_for_qtype(&question.name, question.qtype) else {
         tracing::debug!(
             qname = %question.name,
             qtype = question.qtype,
@@ -321,10 +321,49 @@ fn process_unicast_dns_packet(
             } else {
                 vec![rule]
             };
+            let address = match rule.address {
+                Some(std::net::IpAddr::V4(ipv4)) => ipv4,
+                _ => {
+                    fail_open(backend, context, runtime, "invalid A rule address");
+                    return;
+                }
+            };
             (
                 vec![dns::AnswerRecord::A {
                     owner: question.name.clone(),
-                    address: rule.address.expect("validated A address"),
+                    address,
+                    ttl: rule.ttl,
+                }],
+                contributing_rules,
+                rule.is_builtin,
+            )
+        }
+        crate::config::RuleType::Aaaa => {
+            if question.qtype != 28 {
+                tracing::debug!(
+                    qname = %question.name,
+                    qtype = question.qtype,
+                    "DNS query passed through (record type mismatch)"
+                );
+                reinject_or_log(backend, context, runtime);
+                return;
+            }
+            let contributing_rules = if rule.is_builtin {
+                Vec::new()
+            } else {
+                vec![rule]
+            };
+            let address = match rule.address {
+                Some(std::net::IpAddr::V6(ipv6)) => ipv6,
+                _ => {
+                    fail_open(backend, context, runtime, "invalid AAAA rule address");
+                    return;
+                }
+            };
+            (
+                vec![dns::AnswerRecord::Aaaa {
+                    owner: question.name.clone(),
+                    address,
                     ttl: rule.ttl,
                 }],
                 contributing_rules,
@@ -412,13 +451,32 @@ fn resolve_cname_chain<'a>(
     let mut builtin_hit = false;
     visited.insert(current.clone());
 
-    while let Some(rule) = rules.lookup_normalized(&current) {
+    while let Some(rule) = rules.lookup_for_qtype(&current, qtype) {
         match rule.record_type {
             crate::config::RuleType::A => {
-                if qtype == 1 {
+                if qtype == 1
+                    && let Some(std::net::IpAddr::V4(address)) = rule.address
+                {
                     answers.push(dns::AnswerRecord::A {
                         owner: current,
-                        address: rule.address.expect("validated A address"),
+                        address,
+                        ttl: rule.ttl,
+                    });
+                    if rule.is_builtin {
+                        builtin_hit = true;
+                    } else {
+                        contributing_rules.push(rule);
+                    }
+                }
+                break;
+            }
+            crate::config::RuleType::Aaaa => {
+                if qtype == 28
+                    && let Some(std::net::IpAddr::V6(address)) = rule.address
+                {
+                    answers.push(dns::AnswerRecord::Aaaa {
+                        owner: current,
+                        address,
                         ttl: rule.ttl,
                     });
                     if rule.is_builtin {
@@ -612,6 +670,43 @@ mod tests {
         crate::packet::build_ipv4_udp(test_tuple(), payload).unwrap()
     }
 
+    fn test_ipv6_tuple() -> FlowTuple {
+        FlowTuple {
+            source: std::net::IpAddr::V6("2001:db8::10".parse().unwrap()),
+            source_port: 53000,
+            destination: std::net::IpAddr::V6("2001:db8::53".parse().unwrap()),
+            destination_port: 53,
+        }
+    }
+
+    fn wire_ipv6_packet(payload: &[u8]) -> Vec<u8> {
+        crate::packet::build_ipv6_udp(test_ipv6_tuple(), payload, 64).unwrap()
+    }
+
+    fn ipv6_packet(payload: Option<Vec<u8>>) -> CapturedPacket {
+        let tuple = test_ipv6_tuple();
+        let (original_packet, dns_payload) = match payload {
+            Some(payload) => {
+                let original_packet = wire_ipv6_packet(&payload);
+                let parsed = crate::packet::parse_packet_range(&original_packet).unwrap();
+                (original_packet, Some(parsed.payload_range))
+            }
+            None => (Vec::new(), None),
+        };
+        CapturedPacket {
+            context: FlowContext {
+                tuple: Some(tuple),
+                original_packet,
+                interface_index: 1,
+                outbound: true,
+                backend_context: Box::new(()),
+            },
+            dns_payload,
+            kind: PacketKind::UnicastDns,
+            ip_ttl: 64,
+        }
+    }
+
     fn packet(payload: Option<Vec<u8>>) -> CapturedPacket {
         let tuple = test_tuple();
         let (original_packet, dns_payload) = match payload {
@@ -654,7 +749,7 @@ mod tests {
             .transact(|_| {
                 Ok(vec![RuleInput {
                     name: "match.example".into(),
-                    record_type: crate::config::RuleType::A,
+                    record_type: Some(crate::config::RuleType::A),
                     address: Some("192.0.2.44".into()),
                     target: None,
                     ttl: Some(90),
@@ -670,7 +765,17 @@ mod tests {
     fn a_rule(name: &str, address: &str) -> RuleInput {
         RuleInput {
             name: name.into(),
-            record_type: crate::config::RuleType::A,
+            record_type: Some(crate::config::RuleType::A),
+            address: Some(address.into()),
+            target: None,
+            ttl: Some(60),
+        }
+    }
+
+    fn aaaa_rule(name: &str, address: &str) -> RuleInput {
+        RuleInput {
+            name: name.into(),
+            record_type: Some(crate::config::RuleType::Aaaa),
             address: Some(address.into()),
             target: None,
             ttl: Some(60),
@@ -680,7 +785,7 @@ mod tests {
     fn cname_rule(name: &str, target: &str) -> RuleInput {
         RuleInput {
             name: name.into(),
-            record_type: crate::config::RuleType::Cname,
+            record_type: Some(crate::config::RuleType::Cname),
             address: None,
             target: Some(target.into()),
             ttl: Some(30),
@@ -910,7 +1015,7 @@ mod tests {
         let rules = crate::config::validate_rules(
             vec![RuleInput {
                 name: "*.dns-shunt.local".into(),
-                record_type: crate::config::RuleType::A,
+                record_type: Some(crate::config::RuleType::A),
                 address: Some("192.0.2.9".into()),
                 target: None,
                 ttl: Some(60),
@@ -924,7 +1029,10 @@ mod tests {
         assert!(rule.is_builtin);
         let wildcard_match = rules.lookup_normalized("host.dns-shunt.local").unwrap();
         assert!(!wildcard_match.is_builtin);
-        assert_eq!(wildcard_match.address, Some("192.0.2.9".parse().unwrap()));
+        assert_eq!(
+            wildcard_match.address,
+            Some("192.0.2.9".parse::<std::net::IpAddr>().unwrap())
+        );
     }
 
     #[test]
@@ -1695,5 +1803,230 @@ mod tests {
         assert_eq!(hits["alias.example"], 1);
         assert!(hits.get(&long_target).is_none());
         assert_eq!(runtime.status()["overrides"], 1);
+    }
+
+    #[test]
+    fn aaaa_query_over_ipv4_transport_matching_aaaa_rule() {
+        let (config, runtime) = runtime();
+        replace_rules(&runtime, vec![aaaa_rule("test.example", "2001:db8::1234")]);
+        let backend = MockBackend::default();
+        process_captured_packet(
+            &backend,
+            &config,
+            &runtime,
+            packet(Some(query(1, "test.example", 28, 1))),
+        );
+
+        let responses = backend.responses.lock().unwrap();
+        assert_eq!(responses.len(), 1);
+        let records = answer_types(&responses[0]);
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].0, "test.example");
+        assert_eq!(records[0].1, 28);
+        assert_eq!(records[0].2, 60);
+        let expected_addr: std::net::Ipv6Addr = "2001:db8::1234".parse().unwrap();
+        assert_eq!(records[0].3, expected_addr.octets());
+    }
+
+    #[test]
+    fn a_query_over_ipv6_transport_matching_a_rule() {
+        let (config, runtime) = runtime();
+        replace_rules(&runtime, vec![a_rule("test.example", "192.0.2.1")]);
+        let backend = MockBackend::default();
+        process_captured_packet(
+            &backend,
+            &config,
+            &runtime,
+            ipv6_packet(Some(query(2, "test.example", 1, 1))),
+        );
+
+        let responses = backend.responses.lock().unwrap();
+        assert_eq!(responses.len(), 1);
+        let records = answer_types(&responses[0]);
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].0, "test.example");
+        assert_eq!(records[0].1, 1);
+        assert_eq!(records[0].2, 60);
+        assert_eq!(records[0].3, [192, 0, 2, 1]);
+    }
+
+    #[test]
+    fn aaaa_query_over_ipv6_transport_matching_aaaa_rule() {
+        let (config, runtime) = runtime();
+        replace_rules(&runtime, vec![aaaa_rule("test.example", "2001:db8::abcd")]);
+        let backend = MockBackend::default();
+        process_captured_packet(
+            &backend,
+            &config,
+            &runtime,
+            ipv6_packet(Some(query(3, "test.example", 28, 1))),
+        );
+
+        let responses = backend.responses.lock().unwrap();
+        assert_eq!(responses.len(), 1);
+        let records = answer_types(&responses[0]);
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].0, "test.example");
+        assert_eq!(records[0].1, 28);
+        let expected_addr: std::net::Ipv6Addr = "2001:db8::abcd".parse().unwrap();
+        assert_eq!(records[0].3, expected_addr.octets());
+    }
+
+    #[test]
+    fn aaaa_query_to_domain_with_only_a_rule_fails_open() {
+        let (config, runtime) = runtime();
+        replace_rules(&runtime, vec![a_rule("v4only.example", "192.0.2.1")]);
+        let backend = MockBackend::default();
+        process_captured_packet(
+            &backend,
+            &config,
+            &runtime,
+            packet(Some(query(4, "v4only.example", 28, 1))),
+        );
+
+        assert!(backend.responses.lock().unwrap().is_empty());
+        assert_eq!(backend.reinjections.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn a_query_to_domain_with_only_aaaa_rule_fails_open() {
+        let (config, runtime) = runtime();
+        replace_rules(&runtime, vec![aaaa_rule("v6only.example", "2001:db8::1")]);
+        let backend = MockBackend::default();
+        process_captured_packet(
+            &backend,
+            &config,
+            &runtime,
+            packet(Some(query(5, "v6only.example", 1, 1))),
+        );
+
+        assert!(backend.responses.lock().unwrap().is_empty());
+        assert_eq!(backend.reinjections.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn domain_with_both_a_and_aaaa_rules_answers_respective_records() {
+        let (config, runtime) = runtime();
+        replace_rules(
+            &runtime,
+            vec![
+                a_rule("dual.example", "192.0.2.1"),
+                aaaa_rule("dual.example", "2001:db8::1"),
+            ],
+        );
+        let backend = MockBackend::default();
+
+        process_captured_packet(
+            &backend,
+            &config,
+            &runtime,
+            packet(Some(query(6, "dual.example", 1, 1))),
+        );
+        process_captured_packet(
+            &backend,
+            &config,
+            &runtime,
+            packet(Some(query(7, "dual.example", 28, 1))),
+        );
+
+        let responses = backend.responses.lock().unwrap();
+        assert_eq!(responses.len(), 2);
+
+        let a_records = answer_types(&responses[0]);
+        assert_eq!(a_records[0].1, 1);
+        assert_eq!(a_records[0].3, [192, 0, 2, 1]);
+
+        let aaaa_records = answer_types(&responses[1]);
+        assert_eq!(aaaa_records[0].1, 28);
+        let expected_addr: std::net::Ipv6Addr = "2001:db8::1".parse().unwrap();
+        assert_eq!(aaaa_records[0].3, expected_addr.octets());
+    }
+
+    #[test]
+    fn cname_chain_resolving_to_terminal_aaaa_for_aaaa_query() {
+        let (config, runtime) = runtime();
+        replace_rules(
+            &runtime,
+            vec![
+                cname_rule("alias.example", "target.example"),
+                aaaa_rule("target.example", "2001:db8::99"),
+            ],
+        );
+        let backend = MockBackend::default();
+        process_captured_packet(
+            &backend,
+            &config,
+            &runtime,
+            packet(Some(query(8, "alias.example", 28, 1))),
+        );
+
+        let responses = backend.responses.lock().unwrap();
+        assert_eq!(responses.len(), 1);
+        let records = answer_types(&responses[0]);
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[0].0, "alias.example");
+        assert_eq!(records[0].1, 5);
+        assert_eq!(records[1].0, "target.example");
+        assert_eq!(records[1].1, 28);
+        let expected_addr: std::net::Ipv6Addr = "2001:db8::99".parse().unwrap();
+        assert_eq!(records[1].3, expected_addr.octets());
+    }
+
+    #[test]
+    fn cname_chain_returns_cname_only_when_terminal_record_family_does_not_match() {
+        let (config, runtime) = runtime();
+        replace_rules(
+            &runtime,
+            vec![
+                cname_rule("alias.example", "target.example"),
+                a_rule("target.example", "192.0.2.88"),
+            ],
+        );
+        let backend = MockBackend::default();
+        process_captured_packet(
+            &backend,
+            &config,
+            &runtime,
+            packet(Some(query(9, "alias.example", 28, 1))),
+        );
+
+        let responses = backend.responses.lock().unwrap();
+        assert_eq!(responses.len(), 1);
+        let records = answer_types(&responses[0]);
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].0, "alias.example");
+        assert_eq!(records[0].1, 5);
+    }
+
+    #[test]
+    fn gui_name_answers_both_a_and_aaaa() {
+        let (config, runtime) = runtime();
+        let backend = MockBackend::default();
+
+        process_captured_packet(
+            &backend,
+            &config,
+            &runtime,
+            packet(Some(query(10, "dns-shunt.local", 1, 1))),
+        );
+        process_captured_packet(
+            &backend,
+            &config,
+            &runtime,
+            packet(Some(query(11, "dns-shunt.local", 28, 1))),
+        );
+
+        let responses = backend.responses.lock().unwrap();
+        assert_eq!(responses.len(), 2);
+
+        let a_records = answer_types(&responses[0]);
+        assert_eq!(a_records.len(), 1);
+        assert_eq!(a_records[0].1, 1);
+        assert_eq!(a_records[0].3, [127, 0, 0, 1]);
+
+        let aaaa_records = answer_types(&responses[1]);
+        assert_eq!(aaaa_records.len(), 1);
+        assert_eq!(aaaa_records[0].1, 28);
+        assert_eq!(aaaa_records[0].3, std::net::Ipv6Addr::LOCALHOST.octets());
     }
 }

@@ -4,8 +4,8 @@
   when practical (120 maximum).
 - Avoid `unsafe` Rust; use it only when necessary, keep it narrowly scoped, and
   document the safety invariants.
-- DNS capture uses WinDivert on Windows for outbound, non-loopback IPv4 UDP/53
-  only. Keep unmatched and unsupported packets fail-open; never change adapter
+- DNS capture uses WinDivert on Windows for outbound, non-loopback IPv4 and IPv6
+  UDP/53 only. Keep unmatched and unsupported packets fail-open; never change adapter
   DNS or resolver selection.
 - Foreground capture is opt-in via `--run`. Service capture requires explicit
   Windows service installation; preserve service and tray behavior.

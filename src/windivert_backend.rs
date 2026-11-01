@@ -24,6 +24,7 @@ const MAX_NETWORK_PACKET_SIZE: usize = 65_535 + 40;
 const WIN_DIVERT_FILTER: &str = concat!(
     "!impostor and !loopback and (",
     "(outbound and ip and udp and udp.DstPort == 53 and ip.MF == 0 and ip.FragOff == 0) or ",
+    "(outbound and ipv6 and udp and udp.DstPort == 53) or ",
     "(outbound and udp and udp.DstPort == 5353 and ",
     "((ip and ip.DstAddr == 224.0.0.251) or (ipv6 and ipv6.DstAddr == ff02::fb)))",
     ")"
@@ -159,7 +160,7 @@ impl InterceptionBackend for WinDivertBackend {
         let (tuple, dns_payload, ip_ttl, kind) = match parsed {
             Ok(parsed) => {
                 let kind = if outbound {
-                    if parsed.tuple.destination_port == 53 && parsed.tuple.is_ipv4() {
+                    if parsed.tuple.destination_port == 53 {
                         backend::PacketKind::UnicastDns
                     } else if parsed.tuple.destination_port == 5353 {
                         let is_mdns_dst = match parsed.tuple.destination {
@@ -237,8 +238,8 @@ impl InterceptionBackend for WinDivertBackend {
         let captured = validated_context(context)?;
         let tuple = context
             .tuple
-            .ok_or_else(|| BackendError("response context has no IPv4/UDP tuple".into()))?;
-        let response = packet::build_ipv4_udp(packet::response_tuple(tuple), dns_payload)
+            .ok_or_else(|| BackendError("response context has no IP/UDP tuple".into()))?;
+        let response = packet::build_udp(packet::response_tuple(tuple), dns_payload, 64)
             .map_err(|error| BackendError(error.to_string()))?;
 
         tracing::debug!(

@@ -1,4 +1,4 @@
-use std::net::Ipv4Addr;
+use std::net::{Ipv4Addr, Ipv6Addr};
 use thiserror::Error;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -29,6 +29,11 @@ pub(crate) enum AnswerRecord {
     A {
         owner: String,
         address: Ipv4Addr,
+        ttl: u32,
+    },
+    Aaaa {
+        owner: String,
+        address: Ipv6Addr,
         ttl: u32,
     },
     Cname {
@@ -227,6 +232,24 @@ pub fn build_a_response(
 }
 
 #[cfg(test)]
+pub fn build_aaaa_response(
+    query: &[u8],
+    question: &Question,
+    address: Ipv6Addr,
+    ttl: u32,
+) -> Result<Vec<u8>, DnsError> {
+    build_response(
+        query,
+        question,
+        &[AnswerRecord::Aaaa {
+            owner: question.name.clone(),
+            address,
+            ttl,
+        }],
+    )
+}
+
+#[cfg(test)]
 pub(crate) fn build_response(
     query: &[u8],
     question: &Question,
@@ -335,6 +358,7 @@ fn advertised_udp_size(query: &[u8], question_end: usize) -> Result<usize, DnsEr
 fn encode_answer(output: &mut Vec<u8>, answer: &AnswerRecord) -> Result<(), DnsError> {
     let (owner, rr_type, ttl) = match answer {
         AnswerRecord::A { owner, ttl, .. } => (owner, 1u16, *ttl),
+        AnswerRecord::Aaaa { owner, ttl, .. } => (owner, 28u16, *ttl),
         AnswerRecord::Cname { owner, ttl, .. } => (owner, 5u16, *ttl),
     };
     encode_name(output, owner)?;
@@ -346,6 +370,7 @@ fn encode_answer(output: &mut Vec<u8>, answer: &AnswerRecord) -> Result<(), DnsE
     let data_start = output.len();
     match answer {
         AnswerRecord::A { address, .. } => output.extend_from_slice(&address.octets()),
+        AnswerRecord::Aaaa { address, .. } => output.extend_from_slice(&address.octets()),
         AnswerRecord::Cname { target, .. } => encode_name(output, target)?,
     }
     let data_len = output.len() - data_start;
@@ -676,5 +701,93 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn builds_aaaa_response_preserving_id_and_question() {
+        let original = query("example.com", 28);
+        let question = parse_query(&original).unwrap();
+        let addr: Ipv6Addr = "2001:db8::42".parse().unwrap();
+        let response = build_aaaa_response(&original, &question, addr, 300).unwrap();
+        assert_eq!(&response[12..original.len()], &original[12..]);
+        assert_eq!(&response[..2], &[0x12, 0x34]);
+        assert_eq!(
+            u16::from_be_bytes([response[2], response[3]]) & 0x8400,
+            0x8400
+        );
+        assert_eq!(u16::from_be_bytes([response[6], response[7]]), 1);
+        let mut expected = vec![
+            7, b'e', b'x', b'a', b'm', b'p', b'l', b'e', 3, b'c', b'o', b'm', 0, 0, 28, 0, 1, 0, 0,
+            1, 44, 0, 16,
+        ];
+        expected.extend_from_slice(&addr.octets());
+        assert_eq!(&response[original.len()..], &expected);
+    }
+
+    #[test]
+    fn aaaa_response_preserves_additional_edns() {
+        let mut original = query("example.com", 28);
+        original[11] = 1;
+        original.extend_from_slice(&[0, 0, 41, 4, 208, 0, 0, 0, 0, 0, 0]);
+        let question = parse_query(&original).unwrap();
+        let addr = Ipv6Addr::LOCALHOST;
+        let response = build_aaaa_response(&original, &question, addr, 60).unwrap();
+        assert_eq!(u16::from_be_bytes([response[10], response[11]]), 1);
+        assert_eq!(
+            &response[response.len() - 11..],
+            &original[original.len() - 11..]
+        );
+    }
+
+    #[test]
+    fn builds_ordered_cname_and_aaaa_answers() {
+        let original = query("alias.example", 28);
+        let question = parse_query(&original).unwrap();
+        let addr: Ipv6Addr = "2001:db8::1".parse().unwrap();
+        let response = build_response(
+            &original,
+            &question,
+            &[
+                AnswerRecord::Cname {
+                    owner: "alias.example".into(),
+                    target: "target.example".into(),
+                    ttl: 30,
+                },
+                AnswerRecord::Aaaa {
+                    owner: "target.example".into(),
+                    address: addr,
+                    ttl: 60,
+                },
+            ],
+        )
+        .unwrap();
+        assert_eq!(u16::from_be_bytes([response[6], response[7]]), 2);
+        let mut offset = question.question_end;
+        let (owner, next) = read_name(&response, offset);
+        assert_eq!(owner, "alias.example");
+        offset = next;
+        assert_eq!(
+            u16::from_be_bytes([response[offset], response[offset + 1]]),
+            5
+        );
+        let data_len = u16::from_be_bytes([response[offset + 8], response[offset + 9]]) as usize;
+        let (target, _) = read_name(&response, offset + 10);
+        assert_eq!(target, "target.example");
+        offset += 10 + data_len;
+
+        let (owner, next) = read_name(&response, offset);
+        assert_eq!(owner, "target.example");
+        offset = next;
+        assert_eq!(
+            u16::from_be_bytes([response[offset], response[offset + 1]]),
+            28
+        );
+        assert_eq!(
+            u16::from_be_bytes([response[offset + 2], response[offset + 3]]),
+            1
+        );
+        let rdata_len = u16::from_be_bytes([response[offset + 8], response[offset + 9]]) as usize;
+        assert_eq!(rdata_len, 16);
+        assert_eq!(&response[offset + 10..offset + 26], &addr.octets());
     }
 }

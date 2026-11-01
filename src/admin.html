@@ -492,6 +492,7 @@
               required disabled>
             <select name="type" aria-label="Rule type" disabled>
               <option value="A">A</option>
+              <option value="AAAA">AAAA</option>
               <option value="CNAME">CNAME</option>
             </select>
             <input name="address" placeholder="IPv4 address" required
@@ -743,7 +744,7 @@
           : '<tr><td class="empty" colspan="5">No custom rules.</td></tr>';
         $('rules').innerHTML = ruleRows +
           '<tr><td>' + esc(guiName) + ' <span class="count">' +
-          '(GUI hostname)</span></td><td>A 127.0.0.1</td><td>' + guiTtl +
+          '(GUI hostname)</span></td><td>A 127.0.0.1, AAAA ::1</td><td>' + guiTtl +
           's</td><td class="hit" id="gui-hits">' + guiHits +
           '</td><td></td></tr>';
         updateMutationControls();
@@ -841,9 +842,13 @@
 
       function updateRuleDataField() {
         const form = $('rule-form');
-        const isCname = form.elements.type.value === 'CNAME';
+        const type = form.elements.type.value;
+        const isCname = type === 'CNAME';
         form.elements.address.hidden = isCname;
         form.elements.address.required = !isCname;
+        form.elements.address.placeholder = type === 'AAAA'
+          ? 'IPv6 address'
+          : 'IPv4 address';
         form.elements.target.hidden = !isCname;
         form.elements.target.required = isCname;
       }

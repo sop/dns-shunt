@@ -306,14 +306,16 @@ impl RuntimeState {
                     "name": key,
                     "type": match rule.record_type {
                         config::RuleType::A => "A",
+                        config::RuleType::Aaaa => "AAAA",
                         config::RuleType::Cname => "CNAME",
                     },
                     "ttl": rule.ttl,
                     "hits": hits.get(&key).copied().unwrap_or(0),
                 });
                 match rule.record_type {
-                    config::RuleType::A => {
-                        value["address"] = json!(rule.address.expect("validated A address"));
+                    config::RuleType::A | config::RuleType::Aaaa => {
+                        value["address"] =
+                            json!(rule.address.expect("validated address").to_string());
                     }
                     config::RuleType::Cname => {
                         value["target"] = json!(rule.target.expect("validated CNAME target"));
@@ -341,47 +343,72 @@ pub enum AdminError {
 
 impl AdminServer {
     pub fn bind(runtime: &Arc<RuntimeState>) -> Result<Self, AdminError> {
-        let listener = TcpListener::bind(("127.0.0.1", runtime.config.gui_port))
+        let listener_v4 = TcpListener::bind(("127.0.0.1", runtime.config.gui_port))
             .map_err(|error| AdminError::Bind(runtime.config.gui_port, error))?;
-        listener
+        listener_v4
             .set_nonblocking(true)
             .map_err(|error| AdminError::Bind(runtime.config.gui_port, error))?;
+
+        let listener_v6 = match TcpListener::bind(("::1", runtime.config.gui_port)) {
+            Ok(listener) => match listener.set_nonblocking(true) {
+                Ok(()) => Some(listener),
+                Err(error) => {
+                    tracing::warn!(%error, "could not set IPv6 admin listener to non-blocking");
+                    None
+                }
+            },
+            Err(error) => {
+                tracing::warn!(%error, "could not bind IPv6 loopback admin listener on [::1]");
+                None
+            }
+        };
+
         let runtime = Arc::clone(runtime);
         let worker_runtime = Arc::clone(&runtime);
         let worker = thread::Builder::new()
             .name("dns-shunt-admin".into())
             .spawn(move || {
+                let mut listeners = vec![listener_v4];
+                if let Some(listener_v6) = listener_v6 {
+                    listeners.push(listener_v6);
+                }
                 while !worker_runtime.is_stopping() {
-                    match listener.accept() {
-                        Ok((stream, _)) => {
-                            let connection_runtime = Arc::clone(&worker_runtime);
-                            if let Err(error) = thread::Builder::new()
-                                .name("dns-shunt-admin-connection".into())
-                                .spawn(move || {
-                                    if let Err(error) =
-                                        handle_connection(stream, &connection_runtime)
-                                    {
-                                        connection_runtime.record_error(error);
-                                    }
-                                })
-                            {
-                                worker_runtime.record_error(format!(
-                                    concat!("could not start admin ", "connection thread: {}"),
-                                    error
-                                ));
+                    let mut accepted_any = false;
+                    for listener in &listeners {
+                        match listener.accept() {
+                            Ok((stream, _)) => {
+                                accepted_any = true;
+                                let connection_runtime = Arc::clone(&worker_runtime);
+                                if let Err(error) = thread::Builder::new()
+                                    .name("dns-shunt-admin-connection".into())
+                                    .spawn(move || {
+                                        if let Err(error) =
+                                            handle_connection(stream, &connection_runtime)
+                                        {
+                                            connection_runtime.record_error(error);
+                                        }
+                                    })
+                                {
+                                    worker_runtime.record_error(format!(
+                                        concat!("could not start admin ", "connection thread: {}"),
+                                        error
+                                    ));
+                                }
+                            }
+                            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
+                            Err(error) => {
+                                worker_runtime
+                                    .record_error(format!("admin listener failed: {error}"));
+                                worker_runtime
+                                    .listener_failed
+                                    .store(true, Ordering::Release);
+                                worker_runtime.stop();
+                                return;
                             }
                         }
-                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                            thread::sleep(Duration::from_millis(20))
-                        }
-                        Err(error) => {
-                            worker_runtime.record_error(format!("admin listener failed: {error}"));
-                            worker_runtime
-                                .listener_failed
-                                .store(true, Ordering::Release);
-                            worker_runtime.stop();
-                            break;
-                        }
+                    }
+                    if !accepted_any {
+                        thread::sleep(Duration::from_millis(20));
                     }
                 }
             })
@@ -707,7 +734,13 @@ fn store_error(error: RuleStoreError) -> (u16, String) {
 }
 
 fn allowed_hosts(runtime: &RuntimeState) -> Vec<String> {
-    let hosts = ["127.0.0.1", "localhost", runtime.config.gui_name.as_str()];
+    let hosts = [
+        "127.0.0.1",
+        "::1",
+        "[::1]",
+        "localhost",
+        runtime.config.gui_name.as_str(),
+    ];
     let mut allowed = Vec::with_capacity(hosts.len() * 2);
     for host in hosts {
         allowed.push(format!("{host}:{}", runtime.config.gui_port));
@@ -951,7 +984,7 @@ mod tests {
             .transact(|_| {
                 Ok(vec![config::RuleInput {
                     name: "secret.example".into(),
-                    record_type: config::RuleType::A,
+                    record_type: Some(config::RuleType::A),
                     address: Some("192.0.2.55".into()),
                     target: None,
                     ttl: None,
@@ -1343,7 +1376,7 @@ mod tests {
         let rule = config::validate_rules(
             vec![config::RuleInput {
                 name: "hit.example".into(),
-                record_type: config::RuleType::A,
+                record_type: Some(config::RuleType::A),
                 address: Some("192.0.2.1".into()),
                 target: None,
                 ttl: None,
@@ -1378,7 +1411,7 @@ mod tests {
         let rule = config::validate_rules(
             vec![config::RuleInput {
                 name: "stats.example".into(),
-                record_type: config::RuleType::A,
+                record_type: Some(config::RuleType::A),
                 address: Some("192.0.2.1".into()),
                 target: None,
                 ttl: None,
@@ -1555,7 +1588,7 @@ mod tests {
         let rule = config::validate_rules(
             vec![config::RuleInput {
                 name: "live.example".into(),
-                record_type: config::RuleType::A,
+                record_type: Some(config::RuleType::A),
                 address: Some("192.0.2.10".into()),
                 target: None,
                 ttl: None,
@@ -1594,5 +1627,87 @@ mod tests {
         let mut remaining = Vec::new();
         client.read_to_end(&mut remaining).unwrap();
         worker.join().unwrap().unwrap();
+    }
+
+    #[test]
+    fn supports_typed_aaaa_api_crud_and_rejects_invalid_data_combinations() {
+        let runtime = runtime();
+        let created = route(
+            &request(
+                "POST",
+                "/api/rules",
+                r#"{"name":"ipv6.example","type":"AAAA","address":"2001:db8::1","ttl":45}"#,
+            ),
+            &runtime,
+        )
+        .unwrap();
+        assert_eq!(created.0, 201);
+        let rule = &runtime.rules_json()[0];
+        assert_eq!(rule["name"], "ipv6.example");
+        assert_eq!(rule["type"], "AAAA");
+        assert_eq!(rule["address"], "2001:db8::1");
+        assert_eq!(rule["ttl"], 45);
+        assert!(rule.get("target").is_none());
+
+        assert_eq!(
+            route(
+                &request(
+                    "PUT",
+                    "/api/rules",
+                    r#"{"index":0,"name":"ipv6.example","type":"AAAA","address":"2001:db8::2"}"#,
+                ),
+                &runtime,
+            )
+            .unwrap()
+            .0,
+            200
+        );
+        assert_eq!(runtime.rules_json()[0]["type"], "AAAA");
+        assert_eq!(runtime.rules_json()[0]["address"], "2001:db8::2");
+
+        for body in [
+            r#"{"name":"invalid.example","type":"AAAA","address":"192.0.2.1"}"#,
+            r#"{"name":"conflict.example","type":"AAAA","target":"target.example","address":"2001:db8::1"}"#,
+            r#"{"name":"missing.example","type":"AAAA"}"#,
+        ] {
+            assert_eq!(
+                route(&request("POST", "/api/rules", body), &runtime)
+                    .unwrap_err()
+                    .0,
+                400
+            );
+        }
+    }
+
+    #[test]
+    fn allows_ipv6_loopback_host_and_origin_headers() {
+        let runtime = runtime();
+        let port = runtime.config.gui_port;
+
+        assert!(host_allowed(&format!("[::1]:{port}"), &runtime));
+        assert!(host_allowed(&format!("::1:{port}"), &runtime));
+        assert!(host_allowed(&format!("127.0.0.1:{port}"), &runtime));
+        assert!(host_allowed(&format!("localhost:{port}"), &runtime));
+        assert!(host_allowed(&format!("dns-shunt.local:{port}"), &runtime));
+        assert!(!host_allowed(&format!("evil.example:{port}"), &runtime));
+
+        assert!(origin_allowed(&format!("http://[::1]:{port}"), &runtime));
+        assert!(origin_allowed(&format!("http://::1:{port}"), &runtime));
+        assert!(origin_allowed(
+            &format!("http://127.0.0.1:{port}"),
+            &runtime
+        ));
+        assert!(origin_allowed(
+            &format!("http://localhost:{port}"),
+            &runtime
+        ));
+        assert!(origin_allowed(
+            &format!("http://dns-shunt.local:{port}"),
+            &runtime
+        ));
+        assert!(!origin_allowed(
+            &format!("http://evil.example:{port}"),
+            &runtime
+        ));
     }
 }

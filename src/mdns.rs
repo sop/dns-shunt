@@ -441,15 +441,18 @@ pub fn resolve_mdns_query<'a>(
 
         match rule.record_type {
             RuleType::A => {
-                if q.qtype == 1 {
+                if q.qtype == 1
+                    && let Some(std::net::IpAddr::V4(address)) = rule.address
+                {
                     let record = MdnsRecord::A {
                         owner: q.name.clone(),
-                        address: rule.address.expect("validated A address"),
+                        address,
                         ttl: rule.ttl,
                     };
                     add_or_combine(&mut candidates, &mut seen_keys, record, rule, mode, query);
                 }
             }
+            RuleType::Aaaa => {}
             RuleType::Cname => {
                 let target = rule.target.as_deref().expect("validated CNAME target");
                 let target_rule = rules.lookup_exact(target);
@@ -472,7 +475,7 @@ pub fn resolve_mdns_query<'a>(
 
                         if let Some(target_rule) = target_rule
                             && target_rule.record_type == RuleType::A
-                            && let Some(address) = target_rule.address
+                            && let Some(std::net::IpAddr::V4(address)) = target_rule.address
                         {
                             let a_record = MdnsRecord::A {
                                 owner: target.to_owned(),
@@ -870,7 +873,7 @@ mod tests {
         let rules_vec = crate::config::validate_rules(
             vec![RuleInput {
                 name: "example.local".into(),
-                record_type: RuleType::A,
+                record_type: Some(RuleType::A),
                 address: Some("192.0.2.1".into()),
                 target: None,
                 ttl: Some(100),
@@ -910,14 +913,14 @@ mod tests {
             vec![
                 RuleInput {
                     name: "example.local".into(),
-                    record_type: RuleType::A,
+                    record_type: Some(RuleType::A),
                     address: Some("192.0.2.80".into()),
                     target: None,
                     ttl: Some(80),
                 },
                 RuleInput {
                     name: "*.example.local".into(),
-                    record_type: RuleType::Cname,
+                    record_type: Some(RuleType::Cname),
                     address: None,
                     target: Some("example.local".into()),
                     ttl: Some(40),
@@ -970,14 +973,14 @@ mod tests {
             vec![
                 RuleInput {
                     name: "example.local".into(),
-                    record_type: RuleType::A,
+                    record_type: Some(RuleType::A),
                     address: Some("192.0.2.80".into()),
                     target: None,
                     ttl: Some(80),
                 },
                 RuleInput {
                     name: "*.example.local".into(),
-                    record_type: RuleType::Cname,
+                    record_type: Some(RuleType::Cname),
                     address: None,
                     target: Some("example.local".into()),
                     ttl: Some(40),
@@ -1008,7 +1011,7 @@ mod tests {
         let rules_vec = crate::config::validate_rules(
             vec![RuleInput {
                 name: "host.local".into(),
-                record_type: RuleType::A,
+                record_type: Some(RuleType::A),
                 address: Some("192.0.2.5".into()),
                 target: None,
                 ttl: Some(60),
@@ -1049,21 +1052,21 @@ mod tests {
             vec![
                 RuleInput {
                     name: "dashboard.local".into(),
-                    record_type: RuleType::Cname,
+                    record_type: Some(RuleType::Cname),
                     address: None,
                     target: Some("dns-shunt.local".into()),
                     ttl: Some(30),
                 },
                 RuleInput {
                     name: "loopback.local".into(),
-                    record_type: RuleType::A,
+                    record_type: Some(RuleType::A),
                     address: Some("127.0.0.99".into()),
                     target: None,
                     ttl: Some(30),
                 },
                 RuleInput {
                     name: "lan.local".into(),
-                    record_type: RuleType::A,
+                    record_type: Some(RuleType::A),
                     address: Some("192.168.1.50".into()),
                     target: None,
                     ttl: Some(30),
@@ -1153,7 +1156,7 @@ mod tests {
             name: "example.local".into(),
             wildcard: false,
             record_type: RuleType::A,
-            address: Some(Ipv4Addr::new(192, 0, 2, 1)),
+            address: Some(std::net::IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1))),
             target: None,
             ttl: 60,
             is_builtin: false,

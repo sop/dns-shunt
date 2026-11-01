@@ -98,7 +98,7 @@ log_retention_days = 7
 ```
 
 `ttl` is the default for web-managed rules. `gui_name` defaults to
-`dns-shunt.local` and is a reserved built-in exact override to `127.0.0.1`;
+`dns-shunt.local` and is a reserved built-in exact override to `127.0.0.1` and `::1`;
 `gui_port` defaults to `53080` and is the local HTTP listener port.
 `log_level` specifies the minimum logging verbosity (`trace`, `debug`, `info`,
 `warn`, or `error`), defaulting to `info`.
@@ -137,38 +137,44 @@ cargo run --bin dns-shunt -- --config .\dns-shunt.example.toml --run
 
 With `--run`, the unauthenticated dashboard is available at
 `http://dns-shunt.local:53080` by default (or the configured `gui_name` and
-`gui_port`). The listener binds only to IPv4 loopback and retains Host
-validation and same-origin checks for rule changes. Any local user or process
+`gui_port`). The listener binds to loopback (`127.0.0.1` and `[::1]`) and retains
+Host validation and same-origin checks for rule changes. Any local user or process
 can view dashboard data and add, edit, or delete rules; do not expose the
 listener beyond the local machine. The configured `gui_name` resolves to
 loopback through intercepted DNS as well; use
-`http://127.0.0.1:53080` if DNS-over-HTTPS or another DNS path bypasses
-interception. A port conflict prevents capture from starting.
+`http://127.0.0.1:53080` or `http://[::1]:53080` if DNS-over-HTTPS or another DNS
+path bypasses interception. A port conflict prevents capture from starting.
 
 Foreground user rules are stored as human-readable JSON in
 `%APPDATA%\dns-shunt\rules.json` on Windows. The service instead uses the
 shared `%ProgramData%\dns-shunt\rules\rules.json` and
 `%ProgramData%\dns-shunt\config.toml` files. The browser can add, edit, and
-delete rules immediately. Rules can be A overrides (`type: "A"`, `address`) or
-CNAME aliases (`type: "CNAME"`, `target`); legacy JSON entries containing only
-`name`, `address`, and `ttl` load as A rules. Exact names win; otherwise, the
-most-specific matching wildcard wins. Wildcards match subdomains but not their
-apex. A rules answer A/IN queries only. CNAME rules answer A, AAAA, and explicit
-CNAME/IN queries. For A lookups, DNS Shunt includes a local CNAME chain and
-terminal A record when the target matches a local A rule. For AAAA it returns
-the local CNAME chain without an AAAA record, leaving target resolution to the
-configured DNS server. Explicit CNAME questions receive only the queried
-alias's CNAME record. If a chain reaches an unruled target, DNS Shunt returns
-the known chain and does not query upstream; clients may issue a target lookup
-through the unchanged resolver path. Windows APIs and applications can differ
-in how they expose or follow a CNAME-only answer; no behavior is guaranteed for
-every caller. A rule queried for a different type,
-nonmatching names, other classes, malformed DNS, and unsupported messages are
-re-injected unchanged; unmatched traffic is neither correlated nor counted.
-CNAME chains include at most 16 CNAME records, plus a terminal A record when
-available, and are bounded by the advertised UDP payload size (capped at 1232
-bytes). If necessary, the response contains only the longest leading CNAME
-prefix that fits.
+delete rules immediately. Rules can be A overrides (`type: "A"`, `address`), AAAA
+overrides (`type: "AAAA"`, `address`), or CNAME aliases (`type: "CNAME"`,
+`target`); legacy JSON entries containing only `name`, `address`, and `ttl` load
+as A or AAAA rules depending on the address family. Exact names win; otherwise,
+the most-specific matching wildcard wins. Wildcards match subdomains but not
+their apex. A and AAAA rules for the same name and wildcard can coexist. A rules
+answer A/IN queries only (QTYPE 1); AAAA rules answer AAAA/IN queries only (QTYPE
+28). If a domain has a rule for one address family but not the other, queries
+for the unconfigured family pass through to upstream resolvers unchanged
+(fail-open). CNAME rules answer A, AAAA, and explicit CNAME/IN queries. For A
+lookups, DNS Shunt includes a local CNAME chain and terminal A record when the
+target matches a local A rule. For AAAA lookups, DNS Shunt includes a local CNAME
+chain and terminal AAAA record when the target matches a local AAAA rule. If the
+terminal target only has a rule for the other address family, the CNAME chain
+alone is returned to the querier, leaving target resolution to upstream resolvers.
+Explicit CNAME questions receive only the queried alias's CNAME record. If a
+chain reaches an unruled target, DNS Shunt returns the known chain and does not
+query upstream; clients may issue a target lookup through the unchanged resolver
+path. Windows APIs and applications can differ in how they expose or follow a
+CNAME-only answer; no behavior is guaranteed for every caller. A rule queried for
+a different type, nonmatching names, other classes, malformed DNS, and
+unsupported messages are re-injected unchanged; unmatched traffic is neither
+correlated nor counted. CNAME chains include at most 16 CNAME records, plus a
+terminal A or AAAA record when available, and are bounded by the advertised UDP
+payload size (capped at 1232 bytes). If necessary, the response contains only the
+longest leading CNAME prefix that fits.
 The JSON store is validated in full before it is persisted and published.
 CNAME targets must be concrete DNS names, and configured chains that resolve
 back into a CNAME loop are rejected.
@@ -258,7 +264,7 @@ cargo run --bin dns-shunt -- --config .\dns-shunt.example.toml --run
 
 The WinDivert setup script validates the downloaded archive size and driver
 signature before staging its runtime files. It inspects only outbound,
-non-loopback IPv4 UDP DNS packets to port 53. IPv6, TCP/53, inbound DNS, and
+non-loopback IPv4 and IPv6 UDP DNS packets to port 53. TCP/53, inbound DNS, and
 loopback traffic are outside the interception scope.
 The CNAME behavior above applies only to intercepted unicast UDP/53 traffic.
 It does not add mDNS support: `.local` multicast queries on UDP/5353 remain

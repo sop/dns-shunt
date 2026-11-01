@@ -32,6 +32,7 @@ impl FlowTuple {
         }
     }
 
+    #[allow(dead_code)]
     pub fn is_ipv4(&self) -> bool {
         self.source.is_ipv4() && self.destination.is_ipv4()
     }
@@ -160,6 +161,7 @@ fn parse_ipv6_packet_range(packet: &[u8]) -> Result<ParsedPacket, PacketError> {
     })
 }
 
+#[allow(dead_code)]
 pub fn build_ipv4_udp(tuple: FlowTuple, payload: &[u8]) -> Result<Vec<u8>, PacketError> {
     build_ipv4_udp_with_ttl(tuple, payload, 64)
 }

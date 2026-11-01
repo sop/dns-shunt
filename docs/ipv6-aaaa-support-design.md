@@ -1,6 +1,6 @@
 # Future Design: IPv6 and AAAA Support
 
-**Status:** Proposed; no implementation is implied by this memo.
+**Status:** Implemented.
 
 ## Purpose and Scope
 

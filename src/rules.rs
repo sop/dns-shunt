@@ -238,7 +238,7 @@ mod tests {
     fn input(name: &str, address: &str) -> RuleInput {
         RuleInput {
             name: name.into(),
-            record_type: config::RuleType::A,
+            record_type: Some(config::RuleType::A),
             address: Some(address.into()),
             target: None,
             ttl: Some(60),
@@ -314,14 +314,14 @@ mod tests {
                 .lookup_normalized("www.sub.example.com")
                 .unwrap()
                 .address,
-            Some("192.0.2.2".parse::<std::net::Ipv4Addr>().unwrap())
+            Some("192.0.2.2".parse::<std::net::IpAddr>().unwrap())
         );
         assert_eq!(
             snapshot
                 .lookup_normalized("www.example.com")
                 .unwrap()
                 .address,
-            Some("192.0.2.1".parse::<std::net::Ipv4Addr>().unwrap())
+            Some("192.0.2.1".parse::<std::net::IpAddr>().unwrap())
         );
 
         let stored: Vec<RuleInput> = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
@@ -439,7 +439,10 @@ mod tests {
             .lookup_normalized("dns-shunt.local")
             .unwrap();
         assert!(builtin_rule.is_builtin);
-        assert_eq!(builtin_rule.address, Some(std::net::Ipv4Addr::LOCALHOST));
+        assert_eq!(
+            builtin_rule.address,
+            Some(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST))
+        );
 
         // 3. Adding a rule preserves the built-in rule in packet_snapshot
         manager
