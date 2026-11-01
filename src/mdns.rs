@@ -1,12 +1,15 @@
-use crate::config::{CompiledRules, Rule, RuleType};
+use crate::{
+    admin::RuntimeState,
+    backend::{FlowContext, InterceptionBackend},
+    config::{CompiledRules, Rule, RuleType},
+    packet::{FlowTuple, build_udp},
+};
 use std::{
-    collections::{HashMap, HashSet},
-    net::Ipv4Addr,
+    collections::HashMap,
+    net::{IpAddr, Ipv4Addr},
 };
 use thiserror::Error;
 
-#[allow(dead_code)]
-pub const MDNS_PORT: u16 = 5353;
 pub const MDNS_IPV4_ADDR: Ipv4Addr = Ipv4Addr::new(224, 0, 0, 251);
 pub const MDNS_IPV6_ADDR: std::net::Ipv6Addr =
     std::net::Ipv6Addr::new(0xff02, 0, 0, 0, 0, 0, 0, 0x00fb);
@@ -145,6 +148,7 @@ pub struct MdnsQuery {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg(test)]
 pub struct MdnsResponseInfo {
     pub id: u16,
     pub answers: Vec<MdnsRecord>,
@@ -235,6 +239,7 @@ pub fn parse_mdns_query(message: &[u8], is_legacy: bool) -> Result<MdnsQuery, Md
     })
 }
 
+#[cfg(test)]
 pub fn parse_mdns_response(message: &[u8]) -> Result<MdnsResponseInfo, MdnsError> {
     if message.len() < 12 {
         return Err(MdnsError::Malformed);
@@ -421,17 +426,17 @@ pub fn resolve_mdns_query<'a>(
         if q.qclass != 1 {
             continue;
         }
+
+        let Some(rule) = rules.lookup_normalized(&q.name) else {
+            continue;
+        };
+
         let mode = if query.is_legacy {
             DeliveryMode::Legacy
         } else if q.unicast_response {
             DeliveryMode::QuOnly
         } else {
             DeliveryMode::QmOnly
-        };
-
-        // Match explicit rule only; do NOT match built-in GUI name
-        let Some(rule) = rules.lookup_normalized(&q.name) else {
-            continue;
         };
 
         match rule.record_type {
@@ -447,10 +452,10 @@ pub fn resolve_mdns_query<'a>(
             }
             RuleType::Cname => {
                 let target = rule.target.as_deref().expect("validated CNAME target");
+                let target_rule = rules.lookup_exact(target);
+
                 match q.qtype {
                     1 => {
-                        // For A query: synthesize CNAME with concrete queried name as owner,
-                        // and include target's exact A record if present.
                         let cname_record = MdnsRecord::Cname {
                             owner: q.name.clone(),
                             target: target.to_owned(),
@@ -465,7 +470,7 @@ pub fn resolve_mdns_query<'a>(
                             query,
                         );
 
-                        if let Some(target_rule) = rules.lookup_exact(target)
+                        if let Some(target_rule) = target_rule
                             && target_rule.record_type == RuleType::A
                             && let Some(address) = target_rule.address
                         {
@@ -485,7 +490,6 @@ pub fn resolve_mdns_query<'a>(
                         }
                     }
                     5 | 28 => {
-                        // For CNAME or AAAA query: synthesize CNAME alias with concrete queried name
                         let cname_record = MdnsRecord::Cname {
                             owner: q.name.clone(),
                             target: target.to_owned(),
@@ -548,41 +552,28 @@ fn add_or_combine<'a>(
     }
 }
 
-pub type PartitionedAnswers<'a> = (
-    Vec<(&'a MdnsRecord, &'a Rule)>,
-    Vec<(&'a MdnsRecord, &'a Rule)>,
-);
-
-#[allow(dead_code)]
+/// Partitions candidate native answers into QM (multicast) and QU (unicast)
+/// buckets.
+///
+/// Under the host-only inbound injection model, synthesized responses are
+/// routed back up the local host stack and never touch the physical network.
+/// Per RFC 6762 §5.4, queriers requesting QU answers must also accept
+/// multicast responses. Therefore, candidates with `DeliveryMode::Both` are
+/// satisfied by multicast delivery alone (`qm_answers`) without generating
+/// redundant duplicate unicast packets.
 pub fn partition_native_answers<'a>(
     candidates: &'a [CandidateAnswer<'a>],
-    suppressed_keys: &HashSet<MdnsRrKey>,
-    is_rate_limited: impl Fn(&MdnsRrKey) -> bool,
-) -> PartitionedAnswers<'a> {
+) -> (Vec<&'a CandidateAnswer<'a>>, Vec<&'a CandidateAnswer<'a>>) {
     let mut qm_answers = Vec::new();
     let mut qu_answers = Vec::new();
 
     for candidate in candidates {
-        let key = candidate.record.key();
-        if suppressed_keys.contains(&key) {
-            continue;
-        }
         match candidate.delivery {
-            DeliveryMode::QmOnly => {
-                if !is_rate_limited(&key) {
-                    qm_answers.push((&candidate.record, candidate.contributing_rule));
-                }
+            DeliveryMode::QmOnly | DeliveryMode::Both => {
+                qm_answers.push(candidate);
             }
             DeliveryMode::QuOnly => {
-                qu_answers.push((&candidate.record, candidate.contributing_rule));
-            }
-            DeliveryMode::Both => {
-                if !is_rate_limited(&key) {
-                    qm_answers.push((&candidate.record, candidate.contributing_rule));
-                } else {
-                    // Fall back to QU if QM is rate-limited
-                    qu_answers.push((&candidate.record, candidate.contributing_rule));
-                }
+                qu_answers.push(candidate);
             }
             DeliveryMode::Legacy => {}
         }
@@ -591,22 +582,117 @@ pub fn partition_native_answers<'a>(
     (qm_answers, qu_answers)
 }
 
-#[allow(dead_code)]
-pub fn filter_legacy_answers<'a>(
-    candidates: &'a [CandidateAnswer<'a>],
-    suppressed_keys: &HashSet<MdnsRrKey>,
-) -> Vec<(&'a MdnsRecord, &'a Rule)> {
-    let mut legacy_answers = Vec::new();
-    for candidate in candidates {
-        let key = candidate.record.key();
-        if suppressed_keys.contains(&key) {
-            continue;
-        }
-        if candidate.delivery == DeliveryMode::Legacy {
-            legacy_answers.push((&candidate.record, candidate.contributing_rule));
+pub fn dispatch_native_response(
+    backend: &dyn InterceptionBackend,
+    runtime: &RuntimeState,
+    context: &FlowContext,
+    tuple: FlowTuple,
+    candidates: &[CandidateAnswer<'_>],
+) {
+    let (qm_items, qu_items) = partition_native_answers(candidates);
+
+    if !qm_items.is_empty() {
+        let records: Vec<&MdnsRecord> = qm_items.iter().map(|i| &i.record).collect();
+        if let Ok(payload) = build_native_response(&records) {
+            let multicast_dst = match tuple.source {
+                IpAddr::V4(_) => IpAddr::V4(MDNS_IPV4_ADDR),
+                IpAddr::V6(_) => IpAddr::V6(MDNS_IPV6_ADDR),
+            };
+            let resp_tuple = FlowTuple {
+                source: tuple.source,
+                source_port: 5353,
+                destination: multicast_dst,
+                destination_port: 5353,
+            };
+            if let Ok(packet) = build_udp(resp_tuple, &payload, 255)
+                && backend.inject_raw_packet(context, &packet, false).is_ok()
+            {
+                let rules: Vec<&Rule> = qm_items
+                    .iter()
+                    .map(|i| i.contributing_rule)
+                    .filter(|r| !r.is_builtin)
+                    .collect();
+                let has_builtin = qm_items.iter().any(|i| i.contributing_rule.is_builtin);
+                runtime.record_synthesized(&rules, has_builtin);
+                let response_names: Vec<&str> = qm_items.iter().map(|i| i.record.owner()).collect();
+                tracing::debug!(
+                    names = ?response_names,
+                    "injected synchronous mDNS QM response packet"
+                );
+            }
         }
     }
-    legacy_answers
+
+    if !qu_items.is_empty() {
+        let records: Vec<&MdnsRecord> = qu_items.iter().map(|i| &i.record).collect();
+        if let Ok(payload) = build_native_response(&records) {
+            let resp_tuple = FlowTuple {
+                source: tuple.source,
+                source_port: 5353,
+                destination: tuple.source,
+                destination_port: tuple.source_port,
+            };
+            if let Ok(packet) = build_udp(resp_tuple, &payload, 255)
+                && backend.inject_raw_packet(context, &packet, false).is_ok()
+            {
+                let rules: Vec<&Rule> = qu_items
+                    .iter()
+                    .map(|i| i.contributing_rule)
+                    .filter(|r| !r.is_builtin)
+                    .collect();
+                let has_builtin = qu_items.iter().any(|i| i.contributing_rule.is_builtin);
+                runtime.record_synthesized(&rules, has_builtin);
+                let response_names: Vec<&str> = qu_items.iter().map(|i| i.record.owner()).collect();
+                tracing::debug!(
+                    names = ?response_names,
+                    "injected synchronous mDNS QU response packet"
+                );
+            }
+        }
+    }
+}
+
+pub fn dispatch_legacy_response(
+    backend: &dyn InterceptionBackend,
+    runtime: &RuntimeState,
+    context: &FlowContext,
+    tuple: FlowTuple,
+    query: &MdnsQuery,
+    candidates: &[CandidateAnswer<'_>],
+) {
+    if candidates.is_empty() {
+        return;
+    }
+    let records: Vec<&MdnsRecord> = candidates.iter().map(|c| &c.record).collect();
+    if let Ok(payload) = build_legacy_response(
+        query.id,
+        &query.raw_questions_section,
+        query.questions.len() as u16,
+        &records,
+    ) {
+        let resp_tuple = FlowTuple {
+            source: tuple.source,
+            source_port: 5353,
+            destination: tuple.source,
+            destination_port: tuple.source_port,
+        };
+        if let Ok(packet) = build_udp(resp_tuple, &payload, 255)
+            && backend.inject_raw_packet(context, &packet, false).is_ok()
+        {
+            let rules: Vec<&Rule> = candidates
+                .iter()
+                .map(|c| c.contributing_rule)
+                .filter(|r| !r.is_builtin)
+                .collect();
+            let has_builtin = candidates.iter().any(|c| c.contributing_rule.is_builtin);
+            runtime.record_synthesized(&rules, has_builtin);
+            let response_names: Vec<&str> = candidates.iter().map(|c| c.record.owner()).collect();
+            tracing::debug!(
+                names = ?response_names,
+                "injected synchronous legacy mDNS response packet"
+            );
+        }
+    }
 }
 
 pub fn build_native_response(records: &[&MdnsRecord]) -> Result<Vec<u8>, MdnsError> {
@@ -958,7 +1044,111 @@ mod tests {
     }
 
     #[test]
-    fn partitions_native_answers_with_rate_limiting_and_suppression() {
+    fn answers_gui_name_and_loopback_per_rfc() {
+        let rules_vec = crate::config::validate_rules(
+            vec![
+                RuleInput {
+                    name: "dashboard.local".into(),
+                    record_type: RuleType::Cname,
+                    address: None,
+                    target: Some("dns-shunt.local".into()),
+                    ttl: Some(30),
+                },
+                RuleInput {
+                    name: "loopback.local".into(),
+                    record_type: RuleType::A,
+                    address: Some("127.0.0.99".into()),
+                    target: None,
+                    ttl: Some(30),
+                },
+                RuleInput {
+                    name: "lan.local".into(),
+                    record_type: RuleType::A,
+                    address: Some("192.168.1.50".into()),
+                    target: None,
+                    ttl: Some(30),
+                },
+            ],
+            "dns-shunt.local",
+            60,
+        )
+        .unwrap();
+        let rules = CompiledRules::with_builtin(rules_vec, "dns-shunt.local", 60);
+
+        // QM query for gui_name (DeliveryMode::QmOnly)
+        let wire_gui_qm = build_wire_query(0, &[("dns-shunt.local", 1, 1)], &[]);
+        let query_gui_qm = parse_mdns_query(&wire_gui_qm, false).unwrap();
+        let answers_gui_qm = resolve_mdns_query(&rules, &query_gui_qm);
+        assert_eq!(answers_gui_qm.len(), 1);
+        assert_eq!(answers_gui_qm[0].record.owner(), "dns-shunt.local");
+        assert!(answers_gui_qm[0].contributing_rule.is_builtin);
+        assert_eq!(answers_gui_qm[0].delivery, DeliveryMode::QmOnly);
+        match &answers_gui_qm[0].record {
+            MdnsRecord::A { address, ttl, .. } => {
+                assert_eq!(*address, Ipv4Addr::LOCALHOST);
+                assert_eq!(*ttl, 60);
+            }
+            _ => panic!("expected A record"),
+        }
+
+        // QU query for gui_name (DeliveryMode::QuOnly)
+        let wire_gui_qu = build_wire_query(0, &[("dns-shunt.local", 1, 0x8001)], &[]);
+        let query_gui_qu = parse_mdns_query(&wire_gui_qu, false).unwrap();
+        let answers_gui_qu = resolve_mdns_query(&rules, &query_gui_qu);
+        assert_eq!(answers_gui_qu.len(), 1);
+        assert_eq!(answers_gui_qu[0].record.owner(), "dns-shunt.local");
+        assert_eq!(answers_gui_qu[0].delivery, DeliveryMode::QuOnly);
+
+        // QM query for user loopback rule (DeliveryMode::QmOnly)
+        let wire_loopback_qm = build_wire_query(0, &[("loopback.local", 1, 1)], &[]);
+        let query_loopback_qm = parse_mdns_query(&wire_loopback_qm, false).unwrap();
+        let answers_loopback_qm = resolve_mdns_query(&rules, &query_loopback_qm);
+        assert_eq!(answers_loopback_qm.len(), 1);
+        assert_eq!(answers_loopback_qm[0].delivery, DeliveryMode::QmOnly);
+
+        // QU query for user loopback rule (DeliveryMode::QuOnly)
+        let wire_loopback_qu = build_wire_query(0, &[("loopback.local", 1, 0x8001)], &[]);
+        let query_loopback_qu = parse_mdns_query(&wire_loopback_qu, false).unwrap();
+        let answers_loopback_qu = resolve_mdns_query(&rules, &query_loopback_qu);
+        assert_eq!(answers_loopback_qu.len(), 1);
+        assert_eq!(answers_loopback_qu[0].delivery, DeliveryMode::QuOnly);
+
+        // QM query for LAN rule (must be QmOnly for QM query)
+        let wire_lan = build_wire_query(0, &[("lan.local", 1, 1)], &[]);
+        let query_lan = parse_mdns_query(&wire_lan, false).unwrap();
+        let answers_lan = resolve_mdns_query(&rules, &query_lan);
+        assert_eq!(answers_lan.len(), 1);
+        assert_eq!(answers_lan[0].delivery, DeliveryMode::QmOnly);
+
+        // QM query for CNAME pointing to gui_name: both CNAME and target A are QmOnly
+        let wire_cname_qm = build_wire_query(0, &[("dashboard.local", 1, 1)], &[]);
+        let query_cname_qm = parse_mdns_query(&wire_cname_qm, false).unwrap();
+        let answers_cname_qm = resolve_mdns_query(&rules, &query_cname_qm);
+        assert_eq!(answers_cname_qm.len(), 2);
+        assert_eq!(answers_cname_qm[0].record.owner(), "dashboard.local");
+        assert_eq!(answers_cname_qm[0].delivery, DeliveryMode::QmOnly);
+        assert!(!answers_cname_qm[0].contributing_rule.is_builtin);
+
+        assert_eq!(answers_cname_qm[1].record.owner(), "dns-shunt.local");
+        assert_eq!(answers_cname_qm[1].delivery, DeliveryMode::QmOnly);
+        assert!(answers_cname_qm[1].contributing_rule.is_builtin);
+
+        // QU query for CNAME pointing to gui_name: both CNAME and target A are QuOnly
+        let wire_cname_qu = build_wire_query(0, &[("dashboard.local", 1, 0x8001)], &[]);
+        let query_cname_qu = parse_mdns_query(&wire_cname_qu, false).unwrap();
+        let answers_cname_qu = resolve_mdns_query(&rules, &query_cname_qu);
+        assert_eq!(answers_cname_qu.len(), 2);
+        assert_eq!(answers_cname_qu[0].record.owner(), "dashboard.local");
+        assert_eq!(answers_cname_qu[0].delivery, DeliveryMode::QuOnly);
+        assert!(!answers_cname_qu[0].contributing_rule.is_builtin);
+
+        assert_eq!(answers_cname_qu[1].record.owner(), "dns-shunt.local");
+        assert_eq!(answers_cname_qu[1].delivery, DeliveryMode::QuOnly);
+        assert!(answers_cname_qu[1].contributing_rule.is_builtin);
+    }
+
+    #[test]
+    fn partitions_native_answers_cleanly() {
         let rule = Rule {
             name: "example.local".into(),
             wildcard: false,
@@ -966,6 +1156,7 @@ mod tests {
             address: Some(Ipv4Addr::new(192, 0, 2, 1)),
             target: None,
             ttl: 60,
+            is_builtin: false,
         };
         let candidates = vec![
             CandidateAnswer {
@@ -988,27 +1179,11 @@ mod tests {
             },
         ];
 
-        let suppressed = HashSet::new();
-        // If rate limited on QM, the Both item falls back to QU
-        let (qm, qu) = partition_native_answers(&candidates, &suppressed, |_| true);
-        assert!(qm.is_empty());
-        assert_eq!(qu.len(), 2);
-
-        // If not rate limited, Both stays in QM
-        let (qm2, qu2) = partition_native_answers(&candidates, &suppressed, |_| false);
-        assert_eq!(qm2.len(), 1);
-        assert_eq!(qu2.len(), 1);
-
-        let legacy_candidates = vec![CandidateAnswer {
-            record: MdnsRecord::A {
-                owner: "example.local".into(),
-                address: Ipv4Addr::new(192, 0, 2, 1),
-                ttl: 60,
-            },
-            contributing_rule: &rule,
-            delivery: DeliveryMode::Legacy,
-        }];
-        let legacy = filter_legacy_answers(&legacy_candidates, &suppressed);
-        assert_eq!(legacy.len(), 1);
+        let (qm, qu) = partition_native_answers(&candidates);
+        assert_eq!(qm.len(), 1);
+        assert_eq!(qm[0].record.owner(), "example.local");
+        assert_eq!(qm[0].delivery, DeliveryMode::Both);
+        assert_eq!(qu.len(), 1);
+        assert_eq!(qu[0].record.owner(), "alias.local");
     }
 }

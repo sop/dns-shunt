@@ -2,7 +2,6 @@ use crate::{
     backend::{self, BackendError, CapturedPacket, FlowContext, InterceptionBackend},
     config::Config,
     interfaces::SystemInterfaceProvider,
-    mdns_scheduler::RandomJitter,
     packet,
 };
 use std::{
@@ -26,8 +25,7 @@ const WIN_DIVERT_FILTER: &str = concat!(
     "!impostor and !loopback and (",
     "(outbound and ip and udp and udp.DstPort == 53 and ip.MF == 0 and ip.FragOff == 0) or ",
     "(outbound and udp and udp.DstPort == 5353 and ",
-    "((ip and ip.DstAddr == 224.0.0.251) or (ipv6 and ipv6.DstAddr == ff02::fb))) or ",
-    "(inbound and udp and udp.SrcPort == 5353)",
+    "((ip and ip.DstAddr == 224.0.0.251) or (ipv6 and ipv6.DstAddr == ff02::fb)))",
     ")"
 );
 
@@ -176,8 +174,6 @@ impl InterceptionBackend for WinDivertBackend {
                     } else {
                         backend::PacketKind::Other
                     }
-                } else if parsed.tuple.source_port == 5353 {
-                    backend::PacketKind::InboundMdnsObserver
                 } else {
                     backend::PacketKind::Other
                 };
@@ -192,9 +188,7 @@ impl InterceptionBackend for WinDivertBackend {
         };
 
         let state = match kind {
-            backend::PacketKind::UnicastDns
-            | backend::PacketKind::InboundMdnsObserver
-            | backend::PacketKind::Other => {
+            backend::PacketKind::UnicastDns | backend::PacketKind::Other => {
                 Arc::new(Mutex::new(ContextState::SingleTerminal { resolved: false }))
             }
             backend::PacketKind::OutboundMdnsQuery => {
@@ -368,20 +362,20 @@ impl InterceptionBackend for WinDivertBackend {
         outbound: bool,
     ) -> Result<(), BackendError> {
         let captured = validated_context(context)?;
+        let is_qm = match packet::parse_packet_range(raw_packet) {
+            Ok(parsed) => match parsed.tuple.destination {
+                std::net::IpAddr::V4(v4) => v4 == crate::mdns::MDNS_IPV4_ADDR,
+                std::net::IpAddr::V6(v6) => v6 == crate::mdns::MDNS_IPV6_ADDR,
+            },
+            Err(_) => false,
+        };
         {
             let mut state = captured.state.lock().unwrap();
             match &mut *state {
                 ContextState::MdnsQuery {
-                    forwarded,
-                    qm_sent,
-                    qu_sent,
+                    qm_sent, qu_sent, ..
                 } => {
-                    if !*forwarded {
-                        return Err(BackendError(
-                            "cannot inject response before query is forwarded".into(),
-                        ));
-                    }
-                    if outbound {
+                    if is_qm {
                         if *qm_sent {
                             return Err(BackendError("QM response already sent".into()));
                         }
@@ -443,7 +437,7 @@ fn validated_context(context: &FlowContext) -> Result<&CapturedAddress, BackendE
 }
 
 pub fn run(
-    config: Config,
+    _config: Config,
     runtime: Arc<crate::admin::RuntimeState>,
     console_mode: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -457,10 +451,8 @@ pub fn run(
             shutdown_requested: AtomicBool::new(false),
             receive_buffer: Mutex::new(vec![0; MAX_NETWORK_PACKET_SIZE]),
         }),
-        config,
         runtime,
         Arc::new(SystemInterfaceProvider::new()),
-        Arc::new(RandomJitter),
         console_mode,
     )
 }
@@ -478,7 +470,7 @@ mod tests {
         assert!(filter.contains("!loopback"));
         assert!(filter.contains("udp.DstPort == 53"));
         assert!(filter.contains("udp.DstPort == 5353"));
-        assert!(filter.contains("udp.SrcPort == 5353"));
+        assert!(!filter.contains("udp.SrcPort == 5353"));
         assert!(filter.contains("224.0.0.251"));
         assert!(filter.contains("ff02::fb"));
         assert!(filter.contains("ip.MF == 0 and ip.FragOff == 0"));
@@ -545,5 +537,63 @@ mod tests {
             backend_context: Box::new(()),
         };
         assert!(validated_context(&invalid_context).is_err());
+    }
+
+    #[test]
+    fn inject_raw_packet_without_forward() {
+        let tuple = FlowTuple {
+            source: IpAddr::V4(Ipv4Addr::new(192, 0, 2, 11)),
+            source_port: 5353,
+            destination: IpAddr::V4(Ipv4Addr::new(224, 0, 0, 251)),
+            destination_port: 5353,
+        };
+        let captured = CapturedAddress {
+            address: unsafe { WinDivertAddress::<NetworkLayer>::new() },
+            tuple: Some(tuple),
+            state: Arc::new(Mutex::new(ContextState::MdnsQuery {
+                forwarded: false,
+                qm_sent: false,
+                qu_sent: false,
+            })),
+        };
+        let context = FlowContext {
+            tuple: Some(tuple),
+            original_packet: vec![1, 2, 3],
+            interface_index: 1,
+            outbound: true,
+            backend_context: Box::new(captured),
+        };
+        let metadata = validated_context(&context).unwrap();
+        {
+            let mut state = metadata.state.lock().unwrap();
+            match &mut *state {
+                ContextState::MdnsQuery {
+                    forwarded,
+                    qm_sent,
+                    qu_sent,
+                } => {
+                    assert!(!*forwarded);
+                    assert!(!*qm_sent);
+                    assert!(!*qu_sent);
+                    *qm_sent = true;
+                }
+                _ => panic!("wrong state"),
+            }
+        }
+        {
+            let state = metadata.state.lock().unwrap();
+            match &*state {
+                ContextState::MdnsQuery {
+                    forwarded,
+                    qm_sent,
+                    qu_sent,
+                } => {
+                    assert!(!*forwarded);
+                    assert!(*qm_sent);
+                    assert!(!*qu_sent);
+                }
+                _ => panic!("wrong state"),
+            }
+        }
     }
 }

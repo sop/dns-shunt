@@ -35,6 +35,7 @@ pub struct Rule {
     pub address: Option<Ipv4Addr>,
     pub target: Option<String>,
     pub ttl: u32,
+    pub is_builtin: bool,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
@@ -70,6 +71,22 @@ impl CompiledRules {
             exact_names,
             wildcard_suffixes,
         }
+    }
+
+    pub(crate) fn with_builtin(user_rules: Vec<Rule>, gui_name: &str, gui_ttl: u32) -> Self {
+        let normalized = gui_name.trim_end_matches('.').to_ascii_lowercase();
+        let mut all_rules = Vec::with_capacity(user_rules.len() + 1);
+        all_rules.push(Rule {
+            name: normalized,
+            wildcard: false,
+            record_type: RuleType::A,
+            address: Some(Ipv4Addr::LOCALHOST),
+            target: None,
+            ttl: gui_ttl,
+            is_builtin: true,
+        });
+        all_rules.extend(user_rules);
+        Self::new(all_rules)
     }
 
     pub(crate) fn rules(&self) -> &[Rule] {
@@ -249,6 +266,7 @@ pub fn validate_rules(
             address,
             target,
             ttl,
+            is_builtin: false,
         });
     }
     rules.sort_by(compare_rules);
@@ -848,5 +866,41 @@ log_retention_days = 14
             60,
         );
         assert!(shadowed.is_ok());
+    }
+
+    #[test]
+    fn compiled_rules_with_builtin_precedes_wildcards_and_normalizes() {
+        let user_rules = validate_rules(
+            vec![
+                RuleInput {
+                    name: "*.local".into(),
+                    record_type: RuleType::A,
+                    address: Some("192.0.2.1".into()),
+                    target: None,
+                    ttl: Some(30),
+                },
+                RuleInput {
+                    name: "*.dns-shunt.local".into(),
+                    record_type: RuleType::A,
+                    address: Some("192.0.2.2".into()),
+                    target: None,
+                    ttl: Some(30),
+                },
+            ],
+            "dns-shunt.local",
+            60,
+        )
+        .unwrap();
+
+        let compiled = CompiledRules::with_builtin(user_rules, "DNS-SHUNT.LOCAL.", 45);
+        let rule = compiled.lookup_normalized("dns-shunt.local").unwrap();
+        assert!(rule.is_builtin);
+        assert_eq!(rule.name, "dns-shunt.local");
+        assert_eq!(rule.address, Some(Ipv4Addr::LOCALHOST));
+        assert_eq!(rule.ttl, 45);
+
+        let other = compiled.lookup_normalized("other.local").unwrap();
+        assert!(!other.is_builtin);
+        assert_eq!(other.address, Some(Ipv4Addr::new(192, 0, 2, 1)));
     }
 }

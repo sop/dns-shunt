@@ -11,8 +11,6 @@ mod logging;
 #[cfg(any(target_os = "windows", test))]
 mod mdns;
 #[cfg(any(target_os = "windows", test))]
-mod mdns_scheduler;
-#[cfg(any(target_os = "windows", test))]
 mod packet;
 #[cfg(any(target_os = "windows", test))]
 mod rules;

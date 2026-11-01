@@ -56,17 +56,27 @@ impl RuleManager {
             let _ = persist(&path, &canonical_inputs);
         }
         tracing::debug!(count = rules.len(), "loaded rules snapshot from disk");
+        let compiled = Arc::new(CompiledRules::with_builtin(
+            rules,
+            &reserved_name,
+            default_ttl,
+        ));
         Ok(Self {
             path,
             reserved_name,
             default_ttl,
-            snapshot: RwLock::new(Arc::new(CompiledRules::new(rules))),
+            snapshot: RwLock::new(compiled),
             mutation: Mutex::new(()),
         })
     }
 
     pub fn snapshot(&self) -> Vec<Rule> {
-        self.packet_snapshot().rules().to_vec()
+        self.packet_snapshot()
+            .rules()
+            .iter()
+            .filter(|r| !r.is_builtin)
+            .cloned()
+            .collect()
     }
 
     pub(crate) fn packet_snapshot(&self) -> Arc<CompiledRules> {
@@ -94,7 +104,11 @@ impl RuleManager {
         let proposed = change(&current).map_err(RuleStoreError::Update)?;
         let validated =
             config::validate_rules(proposed.clone(), &self.reserved_name, self.default_ttl)?;
-        let compiled = Arc::new(CompiledRules::new(validated.clone()));
+        let compiled = Arc::new(CompiledRules::with_builtin(
+            validated.clone(),
+            &self.reserved_name,
+            self.default_ttl,
+        ));
         let sorted_inputs = validated.iter().map(config::rule_input).collect::<Vec<_>>();
         persist(&self.path, &sorted_inputs)?;
         *self
@@ -409,5 +423,50 @@ mod tests {
         );
         assert!(Arc::ptr_eq(&active_snapshot, &manager.packet_snapshot()));
         let _ = fs::remove_file(path.parent().unwrap());
+    }
+
+    #[test]
+    fn snapshot_excludes_builtin_rule_while_packet_snapshot_preserves_it() {
+        let path = test_path();
+        let manager = RuleManager::load(path.clone(), "dns-shunt.local".into(), 60).unwrap();
+
+        // 1. Snapshot returns only user rules (empty initially)
+        assert!(manager.snapshot().is_empty());
+
+        // 2. Packet snapshot resolves gui_name to 127.0.0.1
+        let packet_snapshot = manager.packet_snapshot();
+        let builtin_rule = packet_snapshot
+            .lookup_normalized("dns-shunt.local")
+            .unwrap();
+        assert!(builtin_rule.is_builtin);
+        assert_eq!(builtin_rule.address, Some(std::net::Ipv4Addr::LOCALHOST));
+
+        // 3. Adding a rule preserves the built-in rule in packet_snapshot
+        manager
+            .transact(|_| Ok(vec![input("app.local", "192.0.2.1")]))
+            .unwrap();
+        assert_eq!(manager.snapshot().len(), 1);
+        assert_eq!(manager.snapshot()[0].name, "app.local");
+        let updated_packet = manager.packet_snapshot();
+        assert!(
+            updated_packet
+                .lookup_normalized("dns-shunt.local")
+                .unwrap()
+                .is_builtin
+        );
+        assert!(updated_packet.lookup_normalized("app.local").is_some());
+
+        // 4. Deleting the rule preserves the built-in rule
+        manager.transact(|_| Ok(Vec::new())).unwrap();
+        assert!(manager.snapshot().is_empty());
+        assert!(
+            manager
+                .packet_snapshot()
+                .lookup_normalized("dns-shunt.local")
+                .unwrap()
+                .is_builtin
+        );
+
+        let _ = fs::remove_dir_all(path.parent().unwrap());
     }
 }
