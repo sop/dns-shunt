@@ -474,6 +474,7 @@ pub fn run(
     runtime: Arc<crate::admin::RuntimeState>,
     console_mode: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    ensure_runtime_dll()?;
     let driver = WinDivertDriver::open(WIN_DIVERT_FILTER)?;
     if console_mode {
         println!("WinDivert capture active; Ctrl+C stops the foreground process");
@@ -488,6 +489,21 @@ pub fn run(
         Arc::new(SystemInterfaceProvider::new()),
         console_mode,
     )
+}
+
+fn ensure_runtime_dll() -> io::Result<()> {
+    let dll_path = std::env::current_exe()?.with_file_name("WinDivert.dll");
+    if !dll_path.is_file() {
+        return Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            format!(
+                "WinDivert.dll is missing beside the executable: {}. \
+                 Run `scripts\\install-windivert.ps1` before capture.",
+                dll_path.display()
+            ),
+        ));
+    }
+    Ok(())
 }
 
 #[cfg(test)]
