@@ -6,7 +6,7 @@
     <meta name="theme-color" id="theme-color" content="#f4f6ef">
     <meta
       name="description"
-      content="DNS Shunt is a Windows utility for managing local DNS overrides."
+      content="DNS Shunt is a Windows utility for local DNS and mDNS overrides with IPv4, IPv6, and CNAME support."
     >
     <link rel="icon" type="image/png" href="assets/dns-shunt.png">
     <link rel="stylesheet" href="styles.css">
@@ -63,9 +63,10 @@
               Precise DNS overrides. <em>No resolver changes.</em>
             </h1>
             <p class="intro">
-              DNS Shunt lets you direct selected domain names to chosen IP
-              addresses, right on your Windows computer. The rest of your DNS
-              traffic carries on as usual.
+              DNS Shunt lets you direct selected domain names to chosen IPv4,
+              IPv6, or CNAME targets, right on your Windows computer. Supports
+              standard DNS and link-local mDNS without touching your resolver
+              settings.
             </p>
             <div class="hero-actions">
               <a
@@ -86,11 +87,13 @@
               <span class="route-label">MATCHING NAME</span>
               <strong>dev.example.test</strong>
               <span class="route-line" aria-hidden="true"></span>
-              <span class="route-target"><b>&rarr;</b> chosen IP address</span>
+              <span class="route-target">
+                <b>&rarr;</b> chosen IP or CNAME target
+              </span>
             </div>
             <div class="route route-pass">
               <span class="route-label">EVERYTHING ELSE</span>
-              <strong>Other DNS requests</strong>
+              <strong>Other DNS &amp; mDNS requests</strong>
               <span class="route-line" aria-hidden="true"></span>
               <span class="route-target">
                 <b>&rarr;</b> Windows-selected resolver
@@ -104,30 +107,30 @@
 
         <section class="details" aria-label="Product details">
           <article class="detail-card">
-            <span class="index">01 / MATCH</span>
-            <h2>Overrides, on your terms.</h2>
+            <span class="index">01 / OVERRIDE</span>
+            <h2>A, AAAA &amp; CNAME rules.</h2>
             <p>
-              Add an exact domain or a wildcard for its subdomains, then set
-              the IP address it should resolve to. Only matching A/IN queries
-              for IPv4 addresses receive a synthesized answer.
+              Create IPv4 (A), IPv6 (AAAA), and CNAME alias rules with exact or
+              wildcard matching. Dual-stack rules coexist cleanly, and local
+              CNAME chains resolve directly to matching address targets.
             </p>
           </article>
           <article class="detail-card">
             <span class="index">02 / PASS THROUGH</span>
             <h2>Your DNS stays yours.</h2>
             <p>
-              Unmatched and unsupported requests pass through unchanged.
-              Windows continues to choose the resolver; DNS Shunt does not
-              change adapter settings or configure a resolver.
+              Unmatched queries, unconfigured record types, and unsupported
+              requests pass through unchanged. Windows continues to choose the
+              resolver; DNS Shunt never alters adapter settings.
             </p>
           </article>
           <article class="detail-card">
-            <span class="index">03 / RUN</span>
-            <h2>Enabled when you decide.</h2>
+            <span class="index">03 / CAPTURE &amp; TRAY</span>
+            <h2>DNS, mDNS &amp; tray control.</h2>
             <p>
-              Manual packet capture is opt-in. Install the Windows service
-              explicitly to use service mode. Capture is limited to outbound,
-              non-loopback IPv4 DNS over UDP port 53.
+              Intercepts outbound IPv4 and IPv6 DNS (UDP/53) and mDNS (UDP/5353).
+              Run in the foreground for quick testing or install as an automatic
+              Windows service with a notification-area tray controller.
             </p>
           </article>
         </section>
@@ -142,8 +145,8 @@
               <span class="index">01 / DEVELOP</span>
               <h3>Local development</h3>
               <p>
-                Point a development domain at a local service while keeping
-                the hostname your app expects.
+                Point a development domain or .local mDNS name at a local
+                service while keeping the hostname your app expects.
               </p>
             </article>
             <article class="detail-card use-case-card">

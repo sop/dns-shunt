@@ -22,6 +22,7 @@ $windivertSetup = Join-Path $PSScriptRoot "install-windivert.ps1"
 & $windivertSetup
 
 $releaseExecutable = Join-Path $releaseDirectory "dns-shunt.exe"
+$releaseTrayExecutable = Join-Path $releaseDirectory "dns-shunt-tray.exe"
 $releaseDll = Join-Path $releaseDirectory "WinDivert.dll"
 $releaseDriver = Join-Path $releaseDirectory "WinDivert64.sys"
 foreach ($file in @($releaseExecutable, $releaseDll, $releaseDriver)) {
@@ -33,6 +34,9 @@ foreach ($file in @($releaseExecutable, $releaseDll, $releaseDriver)) {
 New-Item -ItemType Directory -Path $InstallDirectory -Force | Out-Null
 New-Item -ItemType Directory -Path $programDataDirectory -Force | Out-Null
 Copy-Item -LiteralPath $releaseExecutable -Destination $InstallDirectory -Force
+if (Test-Path -LiteralPath $releaseTrayExecutable -PathType Leaf) {
+    Copy-Item -LiteralPath $releaseTrayExecutable -Destination $InstallDirectory -Force
+}
 Copy-Item -LiteralPath $releaseDll -Destination $InstallDirectory -Force
 Copy-Item -LiteralPath $releaseDriver -Destination $InstallDirectory -Force
 

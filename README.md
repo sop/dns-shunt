@@ -1,31 +1,39 @@
 # DNS Shunt
 
 DNS Shunt is a Windows utility for managing local DNS overrides. Use its
-browser-based dashboard to direct selected domain names to chosen IP addresses
-or local CNAME targets without changing your Windows DNS settings.
+browser-based dashboard to direct selected domain names to chosen IPv4 addresses,
+IPv6 addresses, or local CNAME targets without changing your Windows DNS settings.
 
 ## What It Does
 
 - Create, edit, and remove DNS override rules in a local dashboard.
-- Create A address overrides and CNAME aliases, including wildcard aliases.
+- Create A (IPv4) overrides, AAAA (IPv6) overrides, and CNAME aliases,
+  including wildcard aliases.
 - Match a domain exactly or use a wildcard for its subdomains.
+- Intercept outbound standard unicast DNS (UDP/53) and multicast DNS (mDNS
+  on UDP/5353) across IPv4 and IPv6.
+- Dual-stack support: A and AAAA rules for the same domain or wildcard can
+  coexist. Queries for unconfigured address families pass through fail-open to
+  upstream resolvers.
 - Run as a Windows service with a notification-area tray app, or run it
   manually when needed.
-- View current-run activity and rule hit counts. DNS query names are not
-  retained.
+- View current-run activity, uptime, fail-open queries, errors, and rule hit
+  counts. DNS query names are not retained.
 
-DNS Shunt only handles supported matching DNS requests. Other requests are
-passed through unchanged, and Windows continues to choose the DNS resolver.
+DNS Shunt only handles supported matching DNS and mDNS requests. Other requests
+are passed through unchanged, and Windows continues to choose the DNS resolver.
 The app does not change network adapter settings or configure a resolver.
-CNAME chains are resolved locally when they reach a matching A rule; if a
-target is not locally ruled, DNS Shunt returns the known CNAME chain without
-querying upstream. The client may then look up that target through the unchanged
-DNS path.
+CNAME chains are resolved locally when they reach a matching A or AAAA rule;
+if a target is not locally ruled, DNS Shunt returns the known CNAME chain
+without querying upstream. The client may then look up that target through the
+unchanged DNS path. For mDNS, outbound link-local queries on UDP/5353 across
+IPv4 (224.0.0.251) and IPv6 ([ff02::fb]) support A, AAAA, CNAME, and ANY
+questions with known-answer suppression and fail-open forwarding.
 
 ## Use Cases
 
-- **Local development:** Point development domains at a local service while
-  keeping the hostname your app expects.
+- **Local development:** Point development domains or .local mDNS names at a
+  local service while keeping the hostname your app expects.
 - **Staging and QA:** Direct selected domains to a staging or QA endpoint from
   your machine without changing system DNS settings.
 - **Deployment testing:** Check a new server by its production hostname before
@@ -62,9 +70,10 @@ configuration is available in [`dns-shunt.example.toml`](dns-shunt.example.toml)
 
 ## How It Works
 
-When enabled, DNS Shunt checks supported outbound IPv4 DNS requests against
-your rules. A match receives a synthesized answer; anything else continues to
-the resolver selected by Windows. Capture is opt-in for manual runs. The
+When enabled, DNS Shunt checks supported outbound IPv4 and IPv6 DNS requests
+(UDP/53) and multicast DNS requests (UDP/5353) against your rules. A match
+receives a synthesized answer; anything else continues to the physical network
+or the resolver selected by Windows. Capture is opt-in for manual runs. The
 Windows service starts at boot only after an administrator installs it.
 
 See the [technical guide](docs/technical-details.md) for configuration,

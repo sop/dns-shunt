@@ -195,5 +195,5 @@ Write-Output (
 )
 Write-Output (
     "Run dns-shunt from an elevated terminal with: " +
-    "cargo run -- --config dns-shunt.example.toml --run"
+    "cargo run --bin dns-shunt -- --config dns-shunt.example.toml --run"
 )

@@ -1,7 +1,7 @@
 # Used when an individual rule does not specify a TTL.
 ttl = 60
 
-# The built-in exact override resolves this name to 127.0.0.1.
+# The built-in exact override resolves this name to 127.0.0.1 and ::1.
 gui_name = "dns-shunt.local"
 
 # Loopback-only HTTP admin listener port.

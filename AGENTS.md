@@ -5,8 +5,8 @@
 - Avoid `unsafe` Rust; use it only when necessary, keep it narrowly scoped, and
   document the safety invariants.
 - DNS capture uses WinDivert on Windows for outbound, non-loopback IPv4 and IPv6
-  UDP/53 only. Keep unmatched and unsupported packets fail-open; never change adapter
-  DNS or resolver selection.
+  UDP/53 (DNS) and UDP/5353 (mDNS). Keep unmatched and unsupported packets fail-open;
+  never change adapter DNS or resolver selection.
 - Foreground capture is opt-in via `--run`. Service capture requires explicit
   Windows service installation; preserve service and tray behavior.
 - The loopback dashboard is unauthenticated. Keep it loopback-only and retain
