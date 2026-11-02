@@ -29,6 +29,7 @@ fn main() {
     bench_unsupported_query_parse(iterations);
     bench_supported_query_classification(iterations);
     bench_rule_lookup(iterations);
+    bench_wildcard_and_mdns_lookup(iterations);
     bench_snapshot_clone();
     bench_receive_lock(iterations);
 }
@@ -200,6 +201,82 @@ fn bench_rule_lookup(iterations: usize) {
             },
         );
     }
+}
+
+fn bench_wildcard_and_mdns_lookup(iterations: usize) {
+    println!("\nWildcard, mDNS, and CNAME lookup paths (100 rules):");
+    let mut inputs: Vec<config::RuleInput> = (0..100)
+        .map(|index| config::RuleInput {
+            name: format!("host{index:05}.example.test"),
+            record_type: Some(config::RuleType::A),
+            address: Some("192.0.2.1".into()),
+            target: None,
+            ttl: Some(60),
+        })
+        .collect();
+    // Wildcard bases of differing depth so the suffix walk is exercised.
+    inputs.push(config::RuleInput {
+        name: "example.test".into(),
+        record_type: Some(config::RuleType::A),
+        address: Some("192.0.2.2".into()),
+        target: None,
+        ttl: Some(60),
+    });
+    inputs.push(config::RuleInput {
+        name: "example.test".into(),
+        record_type: Some(config::RuleType::Aaaa),
+        address: Some("2001:db8::2".into()),
+        target: None,
+        ttl: Some(60),
+    });
+    inputs.push(config::RuleInput {
+        name: "wild.test".into(),
+        record_type: Some(config::RuleType::Cname),
+        address: None,
+        target: Some("target.example.net".into()),
+        ttl: Some(60),
+    });
+    let rules = config::validate_rules(inputs, "dns-shunt.local", 60).unwrap();
+    let compiled = config::CompiledRules::new(rules);
+
+    for (label, name) in [
+        ("wildcard depth 1 (a.example.test)", "a.example.test"),
+        (
+            "wildcard depth 3 (a.b.c.example.test)",
+            "a.b.c.example.test",
+        ),
+        (
+            "wildcard depth 5 (a.b.c.d.e.example.test)",
+            "a.b.c.d.e.example.test",
+        ),
+        ("wildcard miss (a.b.c.unknown.org)", "a.b.c.unknown.org"),
+    ] {
+        measure(&format!("lookup_for_qtype A {label}"), iterations, || {
+            black_box(compiled.lookup_for_qtype(name, 1));
+        });
+    }
+    measure(
+        "lookup_for_qtype AAAA exact-miss wildcard",
+        iterations,
+        || {
+            black_box(compiled.lookup_for_qtype("a.b.example.test", 28));
+        },
+    );
+    for qtype in [1u16, 28, 255] {
+        measure(
+            &format!("lookup_for_mdns qtype={qtype} (a.b.example.test)"),
+            iterations,
+            || {
+                black_box(compiled.lookup_for_mdns("a.b.example.test", qtype));
+            },
+        );
+    }
+    measure("lookup_cname (x.wild.test)", iterations, || {
+        black_box(compiled.lookup_cname("x.wild.test"));
+    });
+    measure("lookup_cname miss (a.b.example.test)", iterations, || {
+        black_box(compiled.lookup_cname("a.b.example.test"));
+    });
 }
 
 fn bench_snapshot_clone() {

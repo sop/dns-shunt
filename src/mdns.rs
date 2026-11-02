@@ -382,7 +382,8 @@ fn parse_name(message: &[u8], offset: usize) -> Result<(String, usize), MdnsErro
     let mut cursor = offset;
     let mut resume = None;
     let mut steps = 0;
-    let mut labels = Vec::new();
+    // Built in place: labels are validated as ASCII before they are appended.
+    let mut name = String::new();
     let mut wire_len = 0;
 
     loop {
@@ -395,7 +396,7 @@ fn parse_name(message: &[u8], offset: usize) -> Result<(String, usize), MdnsErro
             0 => {
                 cursor += 1;
                 if length == 0 {
-                    return Ok((labels.join("."), resume.unwrap_or(cursor)));
+                    return Ok((name, resume.unwrap_or(cursor)));
                 }
                 let len = length as usize;
                 if len > 63 || cursor + len > message.len() {
@@ -407,14 +408,19 @@ fn parse_name(message: &[u8], offset: usize) -> Result<(String, usize), MdnsErro
                         return Err(MdnsError::Malformed);
                     }
                 }
-                let label = std::str::from_utf8(label_bytes)
-                    .map_err(|_| MdnsError::Malformed)?
-                    .to_ascii_lowercase();
                 wire_len += len + 1;
                 if wire_len > 254 {
                     return Err(MdnsError::Malformed);
                 }
-                labels.push(label);
+                if !name.is_empty() {
+                    name.push('.');
+                }
+                // Validated above to be ASCII, so this is always valid UTF-8.
+                name.extend(
+                    label_bytes
+                        .iter()
+                        .map(|&b| char::from(b.to_ascii_lowercase())),
+                );
                 cursor += len;
             }
             0xc0 => {

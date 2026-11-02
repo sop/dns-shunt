@@ -51,45 +51,101 @@ pub enum RuleType {
     Cname,
 }
 
+/// Per-name rule slots. Each slot holds the index of the first rule for that
+/// (name, type), so duplicate names keep first-wins semantics.
+#[derive(Debug, Default)]
+struct RuleSlots {
+    a: Option<usize>,
+    aaaa: Option<usize>,
+    cname: Option<usize>,
+}
+
+impl RuleSlots {
+    fn slot_mut(&mut self, record_type: RuleType) -> &mut Option<usize> {
+        match record_type {
+            RuleType::A => &mut self.a,
+            RuleType::Aaaa => &mut self.aaaa,
+            RuleType::Cname => &mut self.cname,
+        }
+    }
+}
+
 #[derive(Debug)]
 pub(crate) struct CompiledRules {
     rules: Vec<Rule>,
-    exact_a: HashMap<String, usize>,
-    exact_aaaa: HashMap<String, usize>,
-    exact_cname: HashMap<String, usize>,
-    wildcard_a: HashMap<String, usize>,
-    wildcard_aaaa: HashMap<String, usize>,
-    wildcard_cname: HashMap<String, usize>,
+    exact: HashMap<String, RuleSlots>,
+    wildcard: HashMap<String, RuleSlots>,
+    /// Largest label count of any wildcard base name (`*.example.com` -> 2).
+    /// Suffixes with more labels than this can never match a wildcard.
+    max_wildcard_base_labels: usize,
+}
+
+fn label_count(name: &str) -> usize {
+    name.split('.').count()
 }
 
 impl CompiledRules {
     pub(crate) fn new(rules: Vec<Rule>) -> Self {
-        let mut exact_a = HashMap::new();
-        let mut exact_aaaa = HashMap::new();
-        let mut exact_cname = HashMap::new();
-        let mut wildcard_a = HashMap::new();
-        let mut wildcard_aaaa = HashMap::new();
-        let mut wildcard_cname = HashMap::new();
+        let mut exact: HashMap<String, RuleSlots> = HashMap::new();
+        let mut wildcard: HashMap<String, RuleSlots> = HashMap::new();
+        let mut max_wildcard_base_labels = 0;
         for (index, rule) in rules.iter().enumerate() {
-            let map = match (rule.wildcard, rule.record_type) {
-                (false, RuleType::A) => &mut exact_a,
-                (false, RuleType::Aaaa) => &mut exact_aaaa,
-                (false, RuleType::Cname) => &mut exact_cname,
-                (true, RuleType::A) => &mut wildcard_a,
-                (true, RuleType::Aaaa) => &mut wildcard_aaaa,
-                (true, RuleType::Cname) => &mut wildcard_cname,
+            let map = if rule.wildcard {
+                max_wildcard_base_labels = max_wildcard_base_labels.max(label_count(&rule.name));
+                &mut wildcard
+            } else {
+                &mut exact
             };
-            map.entry(rule.name.clone()).or_insert(index);
+            let slot = map
+                .entry(rule.name.clone())
+                .or_default()
+                .slot_mut(rule.record_type);
+            slot.get_or_insert(index);
         }
         Self {
             rules,
-            exact_a,
-            exact_aaaa,
-            exact_cname,
-            wildcard_a,
-            wildcard_aaaa,
-            wildcard_cname,
+            exact,
+            wildcard,
+            max_wildcard_base_labels,
         }
+    }
+
+    fn rule_at(&self, index: Option<usize>) -> Option<&Rule> {
+        index.and_then(|index| self.rules.get(index))
+    }
+
+    /// Returns the closest wildcard entry for `query_name`, walking suffixes
+    /// from longest to shortest. Only strict subdomains are considered.
+    fn closest_wildcard(&self, query_name: &str) -> Option<&RuleSlots> {
+        if self.wildcard.is_empty() {
+            return None;
+        }
+        // A suffix with `k` labels is a wildcard candidate only when
+        // `k <= max_wildcard_base_labels`. The candidate suffixes are the
+        // ones starting after the rightmost `max_wildcard_base_labels` dots.
+        // Find the leftmost of those dots by scanning from the right.
+        let max = self.max_wildcard_base_labels;
+        let mut from = query_name.len();
+        let mut seen = 0;
+        for (dot, _) in query_name.rmatch_indices('.') {
+            from = dot;
+            seen += 1;
+            if seen == max {
+                break;
+            }
+        }
+        if seen < max {
+            // Fewer dots than the bound: every suffix is a candidate, so
+            // start at the first dot.
+            from = query_name.find('.')?;
+        }
+        for (dot, _) in query_name[from..].match_indices('.') {
+            let suffix = &query_name[from + dot + 1..];
+            if let Some(entry) = self.wildcard.get(suffix) {
+                return Some(entry);
+            }
+        }
+        None
     }
 
     pub(crate) fn with_builtin(user_rules: Vec<Rule>, gui_name: &str, gui_ttl: u32) -> Self {
@@ -121,187 +177,101 @@ impl CompiledRules {
         &self.rules
     }
 
+    /// Resolves a single-answer lookup. An exact entry for the name (of any
+    /// type) shadows wildcards entirely; otherwise the closest wildcard entry
+    /// applies. Within an entry, CNAME takes precedence over A/AAAA.
     pub(crate) fn lookup_for_qtype(&self, query_name: &str, qtype: u16) -> Option<&Rule> {
-        let has_exact = self.exact_cname.contains_key(query_name)
-            || self.exact_a.contains_key(query_name)
-            || self.exact_aaaa.contains_key(query_name);
-
-        if has_exact {
-            if let Some(&index) = self.exact_cname.get(query_name) {
-                return self.rules.get(index);
-            }
-            return match qtype {
-                1 => self
-                    .exact_a
-                    .get(query_name)
-                    .and_then(|&i| self.rules.get(i)),
-                28 => self
-                    .exact_aaaa
-                    .get(query_name)
-                    .and_then(|&i| self.rules.get(i)),
-                _ => None,
-            };
+        if let Some(slots) = self.exact.get(query_name) {
+            return self.typed_for_qtype(slots, qtype);
         }
-
-        for (dot, _) in query_name.match_indices('.') {
-            let suffix = &query_name[dot + 1..];
-            let has_wildcard = self.wildcard_cname.contains_key(suffix)
-                || self.wildcard_a.contains_key(suffix)
-                || self.wildcard_aaaa.contains_key(suffix);
-
-            if has_wildcard {
-                if let Some(&index) = self.wildcard_cname.get(suffix) {
-                    return self.rules.get(index);
-                }
-                return match qtype {
-                    1 => self.wildcard_a.get(suffix).and_then(|&i| self.rules.get(i)),
-                    28 => self
-                        .wildcard_aaaa
-                        .get(suffix)
-                        .and_then(|&i| self.rules.get(i)),
-                    _ => None,
-                };
-            }
-        }
-
-        None
+        self.closest_wildcard(query_name)
+            .and_then(|slots| self.typed_for_qtype(slots, qtype))
     }
 
     pub(crate) fn lookup_exact_for_qtype(&self, query_name: &str, qtype: u16) -> Option<&Rule> {
-        let has_exact = self.exact_cname.contains_key(query_name)
-            || self.exact_a.contains_key(query_name)
-            || self.exact_aaaa.contains_key(query_name);
+        self.exact
+            .get(query_name)
+            .and_then(|slots| self.typed_for_qtype(slots, qtype))
+    }
 
-        if !has_exact {
-            return None;
+    fn typed_for_qtype(&self, slots: &RuleSlots, qtype: u16) -> Option<&Rule> {
+        if let Some(rule) = self.rule_at(slots.cname) {
+            return Some(rule);
         }
-
-        if let Some(&index) = self.exact_cname.get(query_name) {
-            return self.rules.get(index);
-        }
-
         match qtype {
-            1 => self
-                .exact_a
-                .get(query_name)
-                .and_then(|&i| self.rules.get(i)),
-            28 => self
-                .exact_aaaa
-                .get(query_name)
-                .and_then(|&i| self.rules.get(i)),
+            1 => self.rule_at(slots.a),
+            28 => self.rule_at(slots.aaaa),
             _ => None,
         }
     }
 
+    /// Returns the rules answering an mDNS query. `query_name` must already be
+    /// normalized (lowercase, no trailing dot), as produced by `mdns::parse_name`.
     pub(crate) fn lookup_for_mdns(&self, query_name: &str, qtype: u16) -> Vec<&Rule> {
-        let name = query_name.trim_end_matches('.').to_ascii_lowercase();
         match qtype {
-            1 | 28 => self.lookup_for_qtype(&name, qtype).into_iter().collect(),
-            5 => self.lookup_cname(&name).into_iter().collect(),
+            1 | 28 => self
+                .lookup_for_qtype(query_name, qtype)
+                .into_iter()
+                .collect(),
+            5 => self.lookup_cname(query_name).into_iter().collect(),
             255 => {
-                let has_exact = self.exact_cname.contains_key(&name)
-                    || self.exact_a.contains_key(&name)
-                    || self.exact_aaaa.contains_key(&name);
-
-                if has_exact {
-                    if let Some(&index) = self.exact_cname.get(&name) {
-                        return self.rules.get(index).into_iter().collect();
-                    }
-                    let mut results = Vec::new();
-                    if let Some(&i) = self.exact_a.get(&name)
-                        && let Some(rule) = self.rules.get(i)
-                    {
-                        results.push(rule);
-                    }
-                    if let Some(&i) = self.exact_aaaa.get(&name)
-                        && let Some(rule) = self.rules.get(i)
-                    {
-                        results.push(rule);
-                    }
-                    return results;
+                let slots = match self.exact.get(query_name) {
+                    Some(slots) => Some(slots),
+                    None => self.closest_wildcard(query_name),
+                };
+                match slots {
+                    Some(slots) => self.any_for_slots(slots),
+                    None => Vec::new(),
                 }
-
-                for (dot, _) in name.match_indices('.') {
-                    let suffix = &name[dot + 1..];
-                    let has_wildcard = self.wildcard_cname.contains_key(suffix)
-                        || self.wildcard_a.contains_key(suffix)
-                        || self.wildcard_aaaa.contains_key(suffix);
-
-                    if has_wildcard {
-                        if let Some(&index) = self.wildcard_cname.get(suffix) {
-                            return self.rules.get(index).into_iter().collect();
-                        }
-                        let mut results = Vec::new();
-                        if let Some(&i) = self.wildcard_a.get(suffix)
-                            && let Some(rule) = self.rules.get(i)
-                        {
-                            results.push(rule);
-                        }
-                        if let Some(&i) = self.wildcard_aaaa.get(suffix)
-                            && let Some(rule) = self.rules.get(i)
-                        {
-                            results.push(rule);
-                        }
-                        return results;
-                    }
-                }
-
-                Vec::new()
             }
             _ => Vec::new(),
         }
     }
 
-    pub(crate) fn lookup_cname(&self, query_name: &str) -> Option<&Rule> {
-        let has_exact = self.exact_cname.contains_key(query_name)
-            || self.exact_a.contains_key(query_name)
-            || self.exact_aaaa.contains_key(query_name);
-
-        if has_exact {
-            return self
-                .exact_cname
-                .get(query_name)
-                .and_then(|&i| self.rules.get(i));
+    /// Every rule for one name: CNAME alone when present, otherwise A and AAAA.
+    fn any_for_slots(&self, slots: &RuleSlots) -> Vec<&Rule> {
+        if let Some(rule) = self.rule_at(slots.cname) {
+            return vec![rule];
         }
-
-        for (dot, _) in query_name.match_indices('.') {
-            let suffix = &query_name[dot + 1..];
-            let has_wildcard = self.wildcard_cname.contains_key(suffix)
-                || self.wildcard_a.contains_key(suffix)
-                || self.wildcard_aaaa.contains_key(suffix);
-
-            if has_wildcard {
-                return self
-                    .wildcard_cname
-                    .get(suffix)
-                    .and_then(|&i| self.rules.get(i));
-            }
-        }
-
-        None
+        [slots.a, slots.aaaa]
+            .into_iter()
+            .filter_map(|index| self.rule_at(index))
+            .collect()
     }
 
+    /// Returns the CNAME rule for the closest matching name, if any. Stops at
+    /// the first wildcard suffix that has any entry, even when it has no CNAME.
+    pub(crate) fn lookup_cname(&self, query_name: &str) -> Option<&Rule> {
+        if let Some(slots) = self.exact.get(query_name) {
+            return self.rule_at(slots.cname);
+        }
+        self.closest_wildcard(query_name)
+            .and_then(|slots| self.rule_at(slots.cname))
+    }
+
+    /// Ungated lookup: exact CNAME, A, AAAA, then per wildcard suffix CNAME,
+    /// A, AAAA, returning the first hit. Unlike `lookup_for_qtype`, it does
+    /// not stop at an exact entry that lacks a hit, so it can fall through to
+    /// wildcards.
     #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn lookup_normalized(&self, query_name: &str) -> Option<&Rule> {
-        if let Some(&index) = self.exact_cname.get(query_name) {
-            return self.rules.get(index);
-        }
-        if let Some(&index) = self.exact_a.get(query_name) {
-            return self.rules.get(index);
-        }
-        if let Some(&index) = self.exact_aaaa.get(query_name) {
-            return self.rules.get(index);
+        if let Some(slots) = self.exact.get(query_name) {
+            let hit = [slots.cname, slots.a, slots.aaaa]
+                .into_iter()
+                .find_map(|index| self.rule_at(index));
+            if hit.is_some() {
+                return hit;
+            }
         }
         for (dot, _) in query_name.match_indices('.') {
             let suffix = &query_name[dot + 1..];
-            if let Some(&index) = self.wildcard_cname.get(suffix) {
-                return self.rules.get(index);
-            }
-            if let Some(&index) = self.wildcard_a.get(suffix) {
-                return self.rules.get(index);
-            }
-            if let Some(&index) = self.wildcard_aaaa.get(suffix) {
-                return self.rules.get(index);
+            if let Some(slots) = self.wildcard.get(suffix) {
+                let hit = [slots.cname, slots.a, slots.aaaa]
+                    .into_iter()
+                    .find_map(|index| self.rule_at(index));
+                if hit.is_some() {
+                    return hit;
+                }
             }
         }
         None
@@ -1330,6 +1300,169 @@ log_retention_days = 14
         // Unsupported QTYPE (e.g. MX 15, TXT 16)
         let res_txt = compiled.lookup_for_mdns("dual.example.local", 16);
         assert!(res_txt.is_empty());
+    }
+
+    fn char_input(name: &str, record_type: RuleType, value: &str) -> RuleInput {
+        let (address, target) = match record_type {
+            RuleType::Cname => (None, Some(value.to_owned())),
+            _ => (Some(value.to_owned()), None),
+        };
+        RuleInput {
+            name: name.into(),
+            record_type: Some(record_type),
+            address,
+            target,
+            ttl: Some(60),
+        }
+    }
+
+    fn compile_characterization(entries: Vec<RuleInput>) -> CompiledRules {
+        CompiledRules::new(validate_rules(entries, "dns-shunt.local", 60).unwrap())
+    }
+
+    // Validation rejects duplicate names and mixed CNAME/A on one name, so
+    // precedence tests build the compiled form from raw rules directly.
+    fn raw_rule(name: &str, record_type: RuleType, wildcard: bool, value: &str) -> Rule {
+        let (address, target) = match record_type {
+            RuleType::Cname => (None, Some(value.to_owned())),
+            _ => (Some(value.parse().unwrap()), None),
+        };
+        Rule {
+            name: name.to_owned(),
+            wildcard,
+            record_type,
+            address,
+            target,
+            ttl: 60,
+            is_builtin: false,
+        }
+    }
+
+    #[test]
+    fn exact_aaaa_rule_blocks_wildcard_a_for_same_name() {
+        let compiled = compile_characterization(vec![
+            char_input("*.example.com", RuleType::A, "192.0.2.1"),
+            char_input("a.b.example.com", RuleType::Aaaa, "2001:db8::1"),
+        ]);
+        // Exact name present for AAAA shadows the wildcard A for every qtype.
+        assert!(compiled.lookup_for_qtype("a.b.example.com", 1).is_none());
+        assert!(compiled.lookup_for_qtype("a.b.example.com", 28).is_some());
+        assert!(compiled.lookup_for_mdns("a.b.example.com", 1).is_empty());
+    }
+
+    #[test]
+    fn exact_cname_shadows_exact_a_and_aaaa() {
+        let compiled = CompiledRules::new(vec![
+            raw_rule("alias.example.com", RuleType::A, false, "192.0.2.1"),
+            raw_rule("alias.example.com", RuleType::Aaaa, false, "2001:db8::1"),
+            raw_rule("alias.example.com", RuleType::Cname, false, "t.example.net"),
+        ]);
+        for qtype in [1u16, 28, 255] {
+            let rule = compiled.lookup_for_qtype("alias.example.com", qtype);
+            if qtype == 255 {
+                continue;
+            }
+            assert_eq!(rule.unwrap().record_type, RuleType::Cname);
+        }
+        let any = compiled.lookup_for_mdns("alias.example.com", 255);
+        assert_eq!(any.len(), 1);
+        assert_eq!(any[0].record_type, RuleType::Cname);
+        assert_eq!(
+            compiled
+                .lookup_cname("alias.example.com")
+                .unwrap()
+                .record_type,
+            RuleType::Cname
+        );
+    }
+
+    #[test]
+    fn closest_wildcard_wins_over_outer_wildcard() {
+        let compiled = compile_characterization(vec![
+            char_input("*.example.com", RuleType::A, "192.0.2.1"),
+            char_input("*.b.example.com", RuleType::A, "192.0.2.2"),
+        ]);
+        let rule = compiled.lookup_for_qtype("a.b.example.com", 1).unwrap();
+        assert_eq!(rule.name, "b.example.com");
+        assert_eq!(rule.address, Some(IpAddr::V4(Ipv4Addr::new(192, 0, 2, 2))));
+        let outer = compiled.lookup_for_qtype("x.example.com", 1).unwrap();
+        assert_eq!(outer.name, "example.com");
+        assert_eq!(outer.address, Some(IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1))));
+    }
+
+    #[test]
+    fn wildcard_does_not_match_its_own_base_name() {
+        let compiled =
+            compile_characterization(vec![char_input("*.example.com", RuleType::A, "192.0.2.1")]);
+        assert!(compiled.lookup_for_qtype("example.com", 1).is_none());
+        assert!(compiled.lookup_for_qtype("example.com", 255).is_none());
+        assert!(compiled.lookup_for_mdns("example.com", 255).is_empty());
+        assert!(compiled.lookup_cname("example.com").is_none());
+        assert!(compiled.lookup_for_qtype("sub.example.com", 1).is_some());
+    }
+
+    #[test]
+    fn deep_query_matches_shallow_wildcard_base() {
+        let compiled =
+            compile_characterization(vec![char_input("*.com", RuleType::A, "192.0.2.1")]);
+        let rule = compiled.lookup_for_qtype("a.b.c.d.example.com", 1);
+        assert_eq!(rule.unwrap().name, "com");
+        assert!(compiled.lookup_for_qtype("com", 1).is_none());
+    }
+
+    #[test]
+    fn no_wildcard_rules_is_exact_only() {
+        let compiled = compile_characterization(vec![char_input(
+            "only.example.com",
+            RuleType::A,
+            "192.0.2.1",
+        )]);
+        assert!(compiled.lookup_for_qtype("x.only.example.com", 1).is_none());
+        assert!(compiled.lookup_for_qtype("only.example.com", 1).is_some());
+        assert!(
+            compiled
+                .lookup_for_mdns("x.only.example.com", 255)
+                .is_empty()
+        );
+        assert!(compiled.lookup_cname("x.only.example.com").is_none());
+    }
+
+    #[test]
+    fn lookup_cname_stops_at_first_wildcard_suffix_without_cname() {
+        let compiled = compile_characterization(vec![
+            char_input("*.b.example.com", RuleType::A, "192.0.2.2"),
+            char_input("*.example.com", RuleType::Cname, "t.example.net"),
+        ]);
+        // Closest suffix has a wildcard A but no CNAME: the walk stops there.
+        assert!(compiled.lookup_cname("a.b.example.com").is_none());
+        assert_eq!(
+            compiled.lookup_cname("a.example.com").unwrap().record_type,
+            RuleType::Cname
+        );
+    }
+
+    #[test]
+    fn duplicate_names_first_rule_wins_per_type() {
+        let compiled = CompiledRules::new(vec![
+            raw_rule("dup.example.com", RuleType::A, false, "192.0.2.1"),
+            raw_rule("dup.example.com", RuleType::A, false, "192.0.2.9"),
+            raw_rule("wd.example.com", RuleType::Aaaa, true, "2001:db8::1"),
+            raw_rule("wd.example.com", RuleType::Aaaa, true, "2001:db8::9"),
+        ]);
+        assert_eq!(
+            compiled
+                .lookup_for_qtype("dup.example.com", 1)
+                .unwrap()
+                .address,
+            Some(IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1)))
+        );
+        assert_eq!(
+            compiled
+                .lookup_for_qtype("x.wd.example.com", 28)
+                .unwrap()
+                .address,
+            Some(IpAddr::V6("2001:db8::1".parse().unwrap()))
+        );
     }
 
     #[test]

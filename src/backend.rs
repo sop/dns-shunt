@@ -461,11 +461,12 @@ fn resolve_cname_chain<'a>(
 ) -> Result<(Vec<dns::AnswerRecord>, Vec<&'a Rule>, bool), ()> {
     let mut answers = Vec::new();
     let mut contributing_rules = Vec::new();
-    let mut visited = std::collections::HashSet::new();
+    // `visited` is only needed once a CNAME hop is followed, so the common
+    // single-answer path does not allocate it.
+    let mut visited: Option<std::collections::HashSet<String>> = None;
     let mut current = query_name.to_owned();
     let mut cname_count = 0;
     let mut builtin_hit = false;
-    visited.insert(current.clone());
 
     while let Some(rule) = rules.lookup_for_qtype(&current, qtype) {
         match rule.record_type {
@@ -508,7 +509,12 @@ fn resolve_cname_chain<'a>(
                     break;
                 }
                 let target = rule.target.as_deref().expect("validated CNAME target");
-                if !visited.insert(target.to_owned()) {
+                let seen = visited.get_or_insert_with(|| {
+                    let mut set = std::collections::HashSet::new();
+                    set.insert(query_name.to_owned());
+                    set
+                });
+                if !seen.insert(target.to_owned()) {
                     return Err(());
                 }
                 answers.push(dns::AnswerRecord::Cname {
