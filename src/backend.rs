@@ -212,12 +212,28 @@ fn process_mdns_query_packet(
     let snapshot = runtime.rules.packet_snapshot();
     let candidates = mdns::resolve_mdns_query(&snapshot, &query);
 
-    let matched_count = query
-        .questions
-        .iter()
-        .filter(|q| q.qclass == 1 && snapshot.lookup_normalized(&q.name).is_some())
-        .count();
-    let all_matched = matched_count > 0 && matched_count == query.questions.len();
+    let all_matched = !query.questions.is_empty()
+        && query.questions.iter().all(|q| {
+            q.qclass == 1
+                && candidates.iter().any(|c| {
+                    c.record
+                        .owner()
+                        .eq_ignore_ascii_case(q.name.trim_end_matches('.'))
+                        && match q.qtype {
+                            1 => matches!(
+                                c.record,
+                                mdns::MdnsRecord::A { .. } | mdns::MdnsRecord::Cname { .. }
+                            ),
+                            28 => matches!(
+                                c.record,
+                                mdns::MdnsRecord::Aaaa { .. } | mdns::MdnsRecord::Cname { .. }
+                            ),
+                            5 => matches!(c.record, mdns::MdnsRecord::Cname { .. }),
+                            255 => true,
+                            _ => false,
+                        }
+                })
+        });
     let none_matched = candidates.is_empty();
 
     if (!all_matched || none_matched)
@@ -1304,6 +1320,45 @@ mod tests {
         }
     }
 
+    fn mdns_ipv6_packet(
+        source_port: u16,
+        destination_ip: IpAddr,
+        destination_port: u16,
+        payload: Vec<u8>,
+        ip_ttl: u8,
+        outbound: bool,
+    ) -> CapturedPacket {
+        let tuple = FlowTuple {
+            source: IpAddr::V6("2001:db8::10".parse().unwrap()),
+            source_port,
+            destination: destination_ip,
+            destination_port,
+        };
+        let original_packet = crate::packet::build_ipv6_udp(tuple, &payload, ip_ttl).unwrap();
+        let payload_range = 48..original_packet.len();
+        let kind = if outbound {
+            if destination_port == 5353 {
+                PacketKind::OutboundMdnsQuery
+            } else {
+                PacketKind::UnicastDns
+            }
+        } else {
+            PacketKind::Other
+        };
+        CapturedPacket {
+            context: FlowContext {
+                tuple: Some(tuple),
+                original_packet,
+                interface_index: 1,
+                outbound,
+                backend_context: Box::new(()),
+            },
+            dns_payload: Some(payload_range),
+            kind,
+            ip_ttl,
+        }
+    }
+
     fn multi_query(id: u16, questions: &[(&str, u16, u16)]) -> Vec<u8> {
         let mut payload = vec![0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
         payload[..2].copy_from_slice(&id.to_be_bytes());
@@ -1329,6 +1384,9 @@ mod tests {
         if_data
             .unicast_addresses
             .push(IpAddr::V4(Ipv4Addr::new(192, 0, 2, 10)));
+        if_data
+            .unicast_addresses
+            .push(IpAddr::V6("2001:db8::10".parse().unwrap()));
         interfaces.add_interface(1, if_data);
 
         test_fn(&interfaces);
@@ -1767,6 +1825,99 @@ mod tests {
             let (tuple, _) = crate::packet::parse_ipv4_udp(&raw[0].0).unwrap();
             assert_eq!(tuple.destination, IpAddr::V4(mdns::MDNS_IPV4_ADDR));
             assert_eq!(tuple.destination_port, 5353);
+        });
+    }
+
+    #[test]
+    fn mdns_ipv6_query_packet_handled_and_injected() {
+        let (_config, runtime) = runtime();
+        replace_rules(&runtime, vec![aaaa_rule("matched.local", "2001:db8::80")]);
+        let backend = Arc::new(MockBackend::default());
+        run_mdns_test(|interfaces| {
+            let mut q_bytes = query(0, "matched.local", 28, 1);
+            q_bytes[2] = 0;
+            q_bytes[3] = 0;
+            let pkt = mdns_ipv6_packet(
+                5353,
+                IpAddr::V6(mdns::MDNS_IPV6_ADDR),
+                5353,
+                q_bytes,
+                255,
+                true,
+            );
+            super::process_captured_packet(backend.as_ref(), &runtime, interfaces, pkt);
+
+            assert_eq!(backend.forwarded.lock().unwrap().len(), 0);
+            let raw = backend.raw_injected.lock().unwrap();
+            assert_eq!(raw.len(), 1);
+            assert!(!raw[0].1); // outbound == false
+
+            // Verify injected packet has IPv6 flow tuple and valid UDP checksum
+            let (tuple, resp_payload) = crate::packet::parse_ipv6_udp(&raw[0].0).unwrap();
+            assert_eq!(tuple.source, "2001:db8::10".parse::<IpAddr>().unwrap());
+            assert_eq!(tuple.destination, IpAddr::V6(mdns::MDNS_IPV6_ADDR));
+            assert_eq!(tuple.source_port, 5353);
+            assert_eq!(tuple.destination_port, 5353);
+
+            let resp_info = mdns::parse_mdns_response(resp_payload).unwrap();
+            assert_eq!(resp_info.answers.len(), 1);
+            assert_eq!(resp_info.answers[0].owner(), "matched.local");
+            assert!(matches!(
+                resp_info.answers[0],
+                mdns::MdnsRecord::Aaaa { .. }
+            ));
+        });
+    }
+
+    #[test]
+    fn mdns_query_with_unanswered_aaaa_is_forwarded() {
+        let (_config, runtime) = runtime();
+        replace_rules(&runtime, vec![a_rule("foo.local", "192.0.2.80")]);
+        let backend = Arc::new(MockBackend::default());
+        run_mdns_test(|interfaces| {
+            // Multi-question query: foo.local A (answered) and bar.local AAAA (unanswered)
+            let q_bytes = multi_query(0, &[("foo.local", 1, 1), ("bar.local", 28, 1)]);
+            let pkt = mdns_packet(
+                5353,
+                IpAddr::V4(mdns::MDNS_IPV4_ADDR),
+                5353,
+                q_bytes,
+                255,
+                true,
+            );
+            super::process_captured_packet(backend.as_ref(), &runtime, interfaces, pkt);
+
+            // Because bar.local AAAA was not answered, the query packet must be forwarded
+            assert_eq!(backend.forwarded.lock().unwrap().len(), 1);
+
+            // Because foo.local A was answered, local answer is also injected
+            let raw = backend.raw_injected.lock().unwrap();
+            assert_eq!(raw.len(), 1);
+            assert_eq!(runtime.status()["overrides"], 1);
+        });
+    }
+
+    #[test]
+    fn mdns_query_for_aaaa_on_a_only_domain_is_forwarded_without_injection() {
+        let (_config, runtime) = runtime();
+        replace_rules(&runtime, vec![a_rule("foo.local", "192.0.2.80")]);
+        let backend = Arc::new(MockBackend::default());
+        run_mdns_test(|interfaces| {
+            let mut q_bytes = query(0, "foo.local", 28, 1);
+            q_bytes[2] = 0;
+            q_bytes[3] = 0;
+            let pkt = mdns_packet(
+                5353,
+                IpAddr::V4(mdns::MDNS_IPV4_ADDR),
+                5353,
+                q_bytes,
+                255,
+                true,
+            );
+            super::process_captured_packet(backend.as_ref(), &runtime, interfaces, pkt);
+
+            assert_eq!(backend.forwarded.lock().unwrap().len(), 1);
+            assert_eq!(backend.raw_injected.lock().unwrap().len(), 0);
         });
     }
 

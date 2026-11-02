@@ -65,6 +65,16 @@ pub fn parse_ipv4_udp(packet: &[u8]) -> Result<(FlowTuple, &[u8]), PacketError> 
 }
 
 #[cfg(test)]
+pub fn parse_ipv6_udp(packet: &[u8]) -> Result<(FlowTuple, &[u8]), PacketError> {
+    let parsed = parse_packet_range(packet)?;
+    if parsed.tuple.is_ipv6() {
+        Ok((parsed.tuple, &packet[parsed.payload_range]))
+    } else {
+        Err(PacketError::Unsupported)
+    }
+}
+
+#[cfg(test)]
 pub fn parse_ipv4_udp_range(packet: &[u8]) -> Result<(FlowTuple, Range<usize>), PacketError> {
     let parsed = parse_packet_range(packet)?;
     if parsed.tuple.is_ipv4() {

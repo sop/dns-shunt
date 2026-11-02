@@ -247,6 +247,19 @@ def main():
         default="example.local",
         help="Domain name to query (default: example.local)",
     )
+    parser.add_argument(
+        "--ipv6",
+        "-6",
+        action="store_true",
+        help="Send query over IPv6 to [ff02::fb]:5353",
+    )
+    parser.add_argument(
+        "--type",
+        "-t",
+        choices=["A", "AAAA", "ANY"],
+        default="A",
+        help="Record type to query (default: A)",
+    )
     args = parser.parse_args()
     domain = args.domain
 
@@ -256,7 +269,14 @@ def main():
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
 
-    # Raw DNS query packet (Type A, Class IN, unicast-response bit set)
+    type_map = {
+        "A": 1,
+        "AAAA": 28,
+        "ANY": 255,
+    }
+    qtype_num = type_map[args.type.upper()]
+
+    # Raw DNS query packet (Class IN, unicast-response bit set)
     # Transaction ID: 0x0000 (standard for mDNS)
     # Flags: 0x0000 (standard query)
     # Questions: 1, Answers: 0, Authority: 0, Additional: 0
@@ -265,19 +285,30 @@ def main():
         b"\x00\x00"  # Standard query flags
         b"\x00\x01\x00\x00\x00\x00\x00\x00"  # 1 question
         + qname
-        + b"\x00\x01"  # Type: A (1)
-        b"\x80\x01"  # Class: IN (1) with QU (unicast response requested)
+        + struct.pack("!H", qtype_num)
+        + b"\x80\x01"  # Class: IN (1) with QU (unicast response requested)
     )
 
-    print(f"Sending mDNS query for '{domain}' to 224.0.0.251:5353...")
-    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
-    sock.settimeout(3.0)
-
-    # Critical: RFC 6762 mandates link-local multicast TTL = 255
-    sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, 255)
-
-    # Send to IPv4 mDNS multicast address
-    sock.sendto(query, ("224.0.0.251", 5353))
+    if args.ipv6:
+        target_addr = "ff02::fb"
+        target_port = 5353
+        print(
+            f"Sending mDNS {args.type} query for '{domain}' to [{target_addr}]:{target_port}..."
+        )
+        sock = socket.socket(socket.AF_INET6, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
+        sock.settimeout(3.0)
+        sock.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_MULTICAST_HOPS, 255)
+        sock.sendto(query, (target_addr, target_port))
+    else:
+        target_addr = "224.0.0.251"
+        target_port = 5353
+        print(
+            f"Sending mDNS {args.type} query for '{domain}' to {target_addr}:{target_port}..."
+        )
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
+        sock.settimeout(3.0)
+        sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, 255)
+        sock.sendto(query, (target_addr, target_port))
 
     responses = 0
     try:
@@ -285,8 +316,9 @@ def main():
             try:
                 data, addr = sock.recvfrom(4096)
                 responses += 1
+                host_str = f"[{addr[0]}]" if args.ipv6 else addr[0]
                 print(
-                    f"\n=== Response #{responses} ({len(data)} bytes from {addr[0]}:{addr[1]}) ==="
+                    f"\n=== Response #{responses} ({len(data)} bytes from {host_str}:{addr[1]}) ==="
                 )
                 print_dns_response(data, addr)
                 # Brief follow-up window to catch any additional responders

@@ -167,7 +167,6 @@ impl CompiledRules {
         None
     }
 
-    #[allow(dead_code)]
     pub(crate) fn lookup_exact_for_qtype(&self, query_name: &str, qtype: u16) -> Option<&Rule> {
         let has_exact = self.exact_cname.contains_key(query_name)
             || self.exact_a.contains_key(query_name)
@@ -191,6 +190,65 @@ impl CompiledRules {
                 .get(query_name)
                 .and_then(|&i| self.rules.get(i)),
             _ => None,
+        }
+    }
+
+    pub(crate) fn lookup_for_mdns(&self, query_name: &str, qtype: u16) -> Vec<&Rule> {
+        let name = query_name.trim_end_matches('.').to_ascii_lowercase();
+        match qtype {
+            1 | 28 => self.lookup_for_qtype(&name, qtype).into_iter().collect(),
+            5 => self.lookup_cname(&name).into_iter().collect(),
+            255 => {
+                let has_exact = self.exact_cname.contains_key(&name)
+                    || self.exact_a.contains_key(&name)
+                    || self.exact_aaaa.contains_key(&name);
+
+                if has_exact {
+                    if let Some(&index) = self.exact_cname.get(&name) {
+                        return self.rules.get(index).into_iter().collect();
+                    }
+                    let mut results = Vec::new();
+                    if let Some(&i) = self.exact_a.get(&name)
+                        && let Some(rule) = self.rules.get(i)
+                    {
+                        results.push(rule);
+                    }
+                    if let Some(&i) = self.exact_aaaa.get(&name)
+                        && let Some(rule) = self.rules.get(i)
+                    {
+                        results.push(rule);
+                    }
+                    return results;
+                }
+
+                for (dot, _) in name.match_indices('.') {
+                    let suffix = &name[dot + 1..];
+                    let has_wildcard = self.wildcard_cname.contains_key(suffix)
+                        || self.wildcard_a.contains_key(suffix)
+                        || self.wildcard_aaaa.contains_key(suffix);
+
+                    if has_wildcard {
+                        if let Some(&index) = self.wildcard_cname.get(suffix) {
+                            return self.rules.get(index).into_iter().collect();
+                        }
+                        let mut results = Vec::new();
+                        if let Some(&i) = self.wildcard_a.get(suffix)
+                            && let Some(rule) = self.rules.get(i)
+                        {
+                            results.push(rule);
+                        }
+                        if let Some(&i) = self.wildcard_aaaa.get(suffix)
+                            && let Some(rule) = self.rules.get(i)
+                        {
+                            results.push(rule);
+                        }
+                        return results;
+                    }
+                }
+
+                Vec::new()
+            }
+            _ => Vec::new(),
         }
     }
 
@@ -223,6 +281,7 @@ impl CompiledRules {
         None
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn lookup_normalized(&self, query_name: &str) -> Option<&Rule> {
         if let Some(&index) = self.exact_cname.get(query_name) {
             return self.rules.get(index);
@@ -246,15 +305,6 @@ impl CompiledRules {
             }
         }
         None
-    }
-
-    pub(crate) fn lookup_exact(&self, query_name: &str) -> Option<&Rule> {
-        let index = self
-            .exact_cname
-            .get(query_name)
-            .or_else(|| self.exact_a.get(query_name))
-            .or_else(|| self.exact_aaaa.get(query_name))?;
-        self.rules.get(*index)
     }
 
     #[cfg(test)]
@@ -1193,6 +1243,93 @@ log_retention_days = 14
                 .lookup_exact_for_qtype("sub.dual.example.net", 28)
                 .is_none()
         );
+    }
+
+    #[test]
+    fn lookup_for_mdns_supported_types() {
+        let entries = vec![
+            RuleInput {
+                name: "dual.example.local".into(),
+                record_type: Some(RuleType::A),
+                address: Some("192.0.2.1".into()),
+                target: None,
+                ttl: Some(60),
+            },
+            RuleInput {
+                name: "dual.example.local".into(),
+                record_type: Some(RuleType::Aaaa),
+                address: Some("2001:db8::1".into()),
+                target: None,
+                ttl: Some(60),
+            },
+            RuleInput {
+                name: "*.wild.example.local".into(),
+                record_type: Some(RuleType::A),
+                address: Some("192.0.2.2".into()),
+                target: None,
+                ttl: Some(60),
+            },
+            RuleInput {
+                name: "*.wild.example.local".into(),
+                record_type: Some(RuleType::Aaaa),
+                address: Some("2001:db8::2".into()),
+                target: None,
+                ttl: Some(60),
+            },
+            RuleInput {
+                name: "alias.example.local".into(),
+                record_type: Some(RuleType::Cname),
+                address: None,
+                target: Some("dual.example.local".into()),
+                ttl: Some(60),
+            },
+        ];
+        let rules = validate_rules(entries, "dns-shunt.local", 60).unwrap();
+        let compiled = CompiledRules::with_builtin(rules, "dns-shunt.local", 60);
+
+        // QTYPE 1 (A)
+        let res_a = compiled.lookup_for_mdns("dual.example.local", 1);
+        assert_eq!(res_a.len(), 1);
+        assert_eq!(res_a[0].record_type, RuleType::A);
+
+        // QTYPE 28 (AAAA)
+        let res_aaaa = compiled.lookup_for_mdns("dual.example.local", 28);
+        assert_eq!(res_aaaa.len(), 1);
+        assert_eq!(res_aaaa[0].record_type, RuleType::Aaaa);
+
+        // QTYPE 5 (CNAME)
+        let res_cname = compiled.lookup_for_mdns("alias.example.local", 5);
+        assert_eq!(res_cname.len(), 1);
+        assert_eq!(res_cname[0].record_type, RuleType::Cname);
+
+        let res_no_cname = compiled.lookup_for_mdns("dual.example.local", 5);
+        assert!(res_no_cname.is_empty());
+
+        // QTYPE 255 (ANY) for exact dual-stack
+        let res_any = compiled.lookup_for_mdns("dual.example.local", 255);
+        assert_eq!(res_any.len(), 2);
+        assert!(res_any.iter().any(|r| r.record_type == RuleType::A));
+        assert!(res_any.iter().any(|r| r.record_type == RuleType::Aaaa));
+
+        // QTYPE 255 (ANY) for CNAME
+        let res_any_cname = compiled.lookup_for_mdns("alias.example.local", 255);
+        assert_eq!(res_any_cname.len(), 1);
+        assert_eq!(res_any_cname[0].record_type, RuleType::Cname);
+
+        // QTYPE 255 (ANY) for wildcard
+        let res_any_wild = compiled.lookup_for_mdns("sub.wild.example.local", 255);
+        assert_eq!(res_any_wild.len(), 2);
+        assert!(res_any_wild.iter().any(|r| r.record_type == RuleType::A));
+        assert!(res_any_wild.iter().any(|r| r.record_type == RuleType::Aaaa));
+
+        // QTYPE 255 (ANY) for builtin gui_name
+        let res_any_gui = compiled.lookup_for_mdns("dns-shunt.local", 255);
+        assert_eq!(res_any_gui.len(), 2);
+        assert!(res_any_gui.iter().all(|r| r.is_builtin));
+
+        // Unsupported QTYPE (e.g. MX 15, TXT 16)
+        let res_txt = compiled.lookup_for_mdns("dual.example.local", 16);
+        assert!(res_txt.is_empty());
     }
 
     #[test]

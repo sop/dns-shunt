@@ -6,13 +6,12 @@ use crate::{
 };
 use std::{
     collections::HashMap,
-    net::{IpAddr, Ipv4Addr},
+    net::{IpAddr, Ipv4Addr, Ipv6Addr},
 };
 use thiserror::Error;
 
 pub const MDNS_IPV4_ADDR: Ipv4Addr = Ipv4Addr::new(224, 0, 0, 251);
-pub const MDNS_IPV6_ADDR: std::net::Ipv6Addr =
-    std::net::Ipv6Addr::new(0xff02, 0, 0, 0, 0, 0, 0, 0x00fb);
+pub const MDNS_IPV6_ADDR: Ipv6Addr = Ipv6Addr::new(0xff02, 0, 0, 0, 0, 0, 0, 0x00fb);
 
 pub const MAX_NATIVE_TTL: u32 = 120;
 pub const MAX_LEGACY_TTL: u32 = 10;
@@ -64,6 +63,11 @@ pub enum MdnsRecord {
         address: Ipv4Addr,
         ttl: u32,
     },
+    Aaaa {
+        owner: String,
+        address: Ipv6Addr,
+        ttl: u32,
+    },
     Cname {
         owner: String,
         target: String,
@@ -81,7 +85,10 @@ pub enum MdnsRecord {
 impl MdnsRecord {
     pub fn owner(&self) -> &str {
         match self {
-            Self::A { owner, .. } | Self::Cname { owner, .. } | Self::Raw { owner, .. } => owner,
+            Self::A { owner, .. }
+            | Self::Aaaa { owner, .. }
+            | Self::Cname { owner, .. }
+            | Self::Raw { owner, .. } => owner,
         }
     }
 
@@ -89,20 +96,24 @@ impl MdnsRecord {
         match self {
             Self::A { .. } => 1,
             Self::Cname { .. } => 5,
+            Self::Aaaa { .. } => 28,
             Self::Raw { rr_type, .. } => *rr_type,
         }
     }
 
     pub fn class(&self) -> u16 {
         match self {
-            Self::A { .. } | Self::Cname { .. } => 1,
+            Self::A { .. } | Self::Aaaa { .. } | Self::Cname { .. } => 1,
             Self::Raw { class, .. } => *class,
         }
     }
 
     pub fn ttl(&self) -> u32 {
         match self {
-            Self::A { ttl, .. } | Self::Cname { ttl, .. } | Self::Raw { ttl, .. } => *ttl,
+            Self::A { ttl, .. }
+            | Self::Aaaa { ttl, .. }
+            | Self::Cname { ttl, .. }
+            | Self::Raw { ttl, .. } => *ttl,
         }
     }
 
@@ -110,6 +121,9 @@ impl MdnsRecord {
         let mut rdata = Vec::new();
         match self {
             Self::A { address, .. } => {
+                rdata.extend_from_slice(&address.octets());
+            }
+            Self::Aaaa { address, .. } => {
                 rdata.extend_from_slice(&address.octets());
             }
             Self::Cname { target, .. } => {
@@ -326,6 +340,16 @@ fn parse_record(message: &[u8], offset: usize) -> Result<(MdnsRecord, usize), Md
                 ttl,
             }
         }
+        28 if rdlength == 16 => {
+            let octets: [u8; 16] = message[rdata_start..rdata_end]
+                .try_into()
+                .map_err(|_| MdnsError::Malformed)?;
+            MdnsRecord::Aaaa {
+                owner,
+                address: Ipv6Addr::from(octets),
+                ttl,
+            }
+        }
         5 => {
             let (target, target_end) = parse_name(message, rdata_start)?;
             if target_end != rdata_end {
@@ -427,10 +451,6 @@ pub fn resolve_mdns_query<'a>(
             continue;
         }
 
-        let Some(rule) = rules.lookup_normalized(&q.name) else {
-            continue;
-        };
-
         let mode = if query.is_legacy {
             DeliveryMode::Legacy
         } else if q.unicast_response {
@@ -439,75 +459,88 @@ pub fn resolve_mdns_query<'a>(
             DeliveryMode::QmOnly
         };
 
-        match rule.record_type {
-            RuleType::A => {
-                if q.qtype == 1
-                    && let Some(std::net::IpAddr::V4(address)) = rule.address
-                {
-                    let record = MdnsRecord::A {
+        let matching_rules = rules.lookup_for_mdns(&q.name, q.qtype);
+        for rule in matching_rules {
+            match rule.record_type {
+                RuleType::A => {
+                    if (q.qtype == 1 || q.qtype == 255)
+                        && let Some(IpAddr::V4(address)) = rule.address
+                    {
+                        let record = MdnsRecord::A {
+                            owner: q.name.clone(),
+                            address,
+                            ttl: rule.ttl,
+                        };
+                        add_or_combine(&mut candidates, &mut seen_keys, record, rule, mode, query);
+                    }
+                }
+                RuleType::Aaaa => {
+                    if (q.qtype == 28 || q.qtype == 255)
+                        && let Some(IpAddr::V6(address)) = rule.address
+                    {
+                        let record = MdnsRecord::Aaaa {
+                            owner: q.name.clone(),
+                            address,
+                            ttl: rule.ttl,
+                        };
+                        add_or_combine(&mut candidates, &mut seen_keys, record, rule, mode, query);
+                    }
+                }
+                RuleType::Cname => {
+                    let target = rule.target.as_deref().expect("validated CNAME target");
+                    let cname_record = MdnsRecord::Cname {
                         owner: q.name.clone(),
-                        address,
+                        target: target.to_owned(),
                         ttl: rule.ttl,
                     };
-                    add_or_combine(&mut candidates, &mut seen_keys, record, rule, mode, query);
-                }
-            }
-            RuleType::Aaaa => {}
-            RuleType::Cname => {
-                let target = rule.target.as_deref().expect("validated CNAME target");
-                let target_rule = rules.lookup_exact(target);
+                    add_or_combine(
+                        &mut candidates,
+                        &mut seen_keys,
+                        cname_record,
+                        rule,
+                        mode,
+                        query,
+                    );
 
-                match q.qtype {
-                    1 => {
-                        let cname_record = MdnsRecord::Cname {
-                            owner: q.name.clone(),
-                            target: target.to_owned(),
-                            ttl: rule.ttl,
+                    if (q.qtype == 1 || q.qtype == 255)
+                        && let Some(target_rule) = rules.lookup_exact_for_qtype(target, 1)
+                        && target_rule.record_type == RuleType::A
+                        && let Some(IpAddr::V4(address)) = target_rule.address
+                    {
+                        let a_record = MdnsRecord::A {
+                            owner: target.to_owned(),
+                            address,
+                            ttl: target_rule.ttl,
                         };
                         add_or_combine(
                             &mut candidates,
                             &mut seen_keys,
-                            cname_record,
-                            rule,
+                            a_record,
+                            target_rule,
                             mode,
                             query,
                         );
-
-                        if let Some(target_rule) = target_rule
-                            && target_rule.record_type == RuleType::A
-                            && let Some(std::net::IpAddr::V4(address)) = target_rule.address
-                        {
-                            let a_record = MdnsRecord::A {
-                                owner: target.to_owned(),
-                                address,
-                                ttl: target_rule.ttl,
-                            };
-                            add_or_combine(
-                                &mut candidates,
-                                &mut seen_keys,
-                                a_record,
-                                target_rule,
-                                mode,
-                                query,
-                            );
-                        }
                     }
-                    5 | 28 => {
-                        let cname_record = MdnsRecord::Cname {
-                            owner: q.name.clone(),
-                            target: target.to_owned(),
-                            ttl: rule.ttl,
+
+                    if (q.qtype == 28 || q.qtype == 255)
+                        && let Some(target_rule) = rules.lookup_exact_for_qtype(target, 28)
+                        && target_rule.record_type == RuleType::Aaaa
+                        && let Some(IpAddr::V6(address)) = target_rule.address
+                    {
+                        let aaaa_record = MdnsRecord::Aaaa {
+                            owner: target.to_owned(),
+                            address,
+                            ttl: target_rule.ttl,
                         };
                         add_or_combine(
                             &mut candidates,
                             &mut seen_keys,
-                            cname_record,
-                            rule,
+                            aaaa_record,
+                            target_rule,
                             mode,
                             query,
                         );
                     }
-                    _ => {}
                 }
             }
         }
@@ -758,6 +791,9 @@ fn encode_record(output: &mut Vec<u8>, record: &MdnsRecord, max_ttl: u32) -> Res
 
     match record {
         MdnsRecord::A { address, .. } => {
+            output.extend_from_slice(&address.octets());
+        }
+        MdnsRecord::Aaaa { address, .. } => {
             output.extend_from_slice(&address.octets());
         }
         MdnsRecord::Cname { target, .. } => {
@@ -1188,5 +1224,260 @@ mod tests {
         assert_eq!(qm[0].delivery, DeliveryMode::Both);
         assert_eq!(qu.len(), 1);
         assert_eq!(qu[0].record.owner(), "alias.local");
+    }
+
+    #[test]
+    fn encodes_and_parses_mdns_aaaa_record() {
+        let addr = Ipv6Addr::new(0x2001, 0x0db8, 0, 0, 0, 0, 0, 1);
+        let record = MdnsRecord::Aaaa {
+            owner: "ipv6.local".into(),
+            address: addr,
+            ttl: 120,
+        };
+        let records = vec![&record];
+        let response_bytes = build_native_response(&records).unwrap();
+        let parsed = parse_mdns_response(&response_bytes).unwrap();
+        assert_eq!(parsed.answers.len(), 1);
+        match &parsed.answers[0] {
+            MdnsRecord::Aaaa {
+                owner,
+                address,
+                ttl,
+            } => {
+                assert_eq!(owner, "ipv6.local");
+                assert_eq!(*address, addr);
+                assert_eq!(*ttl, 120);
+            }
+            _ => panic!("expected AAAA record"),
+        }
+    }
+
+    #[test]
+    fn resolves_mdns_query_for_aaaa_rule() {
+        let rules_vec = crate::config::validate_rules(
+            vec![RuleInput {
+                name: "host.local".into(),
+                record_type: Some(RuleType::Aaaa),
+                address: Some("2001:db8::1".into()),
+                target: None,
+                ttl: Some(60),
+            }],
+            "dns-shunt.local",
+            60,
+        )
+        .unwrap();
+        let rules = CompiledRules::new(rules_vec);
+
+        let wire = build_wire_query(0, &[("host.local", 28, 1)], &[]);
+        let query = parse_mdns_query(&wire, false).unwrap();
+        let answers = resolve_mdns_query(&rules, &query);
+        assert_eq!(answers.len(), 1);
+        assert_eq!(answers[0].record.owner(), "host.local");
+        match &answers[0].record {
+            MdnsRecord::Aaaa { address, ttl, .. } => {
+                assert_eq!(*address, "2001:db8::1".parse::<Ipv6Addr>().unwrap());
+                assert_eq!(*ttl, 60);
+            }
+            _ => panic!("expected AAAA record"),
+        }
+
+        // QTYPE 1 (A) query for AAAA-only rule produces no answers
+        let wire_a = build_wire_query(0, &[("host.local", 1, 1)], &[]);
+        let query_a = parse_mdns_query(&wire_a, false).unwrap();
+        let answers_a = resolve_mdns_query(&rules, &query_a);
+        assert!(answers_a.is_empty());
+    }
+
+    #[test]
+    fn resolves_mdns_query_for_dual_stack_rule() {
+        let rules_vec = crate::config::validate_rules(
+            vec![
+                RuleInput {
+                    name: "dual.local".into(),
+                    record_type: Some(RuleType::A),
+                    address: Some("192.0.2.1".into()),
+                    target: None,
+                    ttl: Some(60),
+                },
+                RuleInput {
+                    name: "dual.local".into(),
+                    record_type: Some(RuleType::Aaaa),
+                    address: Some("2001:db8::1".into()),
+                    target: None,
+                    ttl: Some(60),
+                },
+            ],
+            "dns-shunt.local",
+            60,
+        )
+        .unwrap();
+        let rules = CompiledRules::new(rules_vec);
+
+        // QTYPE 1 -> only A
+        let wire_a = build_wire_query(0, &[("dual.local", 1, 1)], &[]);
+        let query_a = parse_mdns_query(&wire_a, false).unwrap();
+        let answers_a = resolve_mdns_query(&rules, &query_a);
+        assert_eq!(answers_a.len(), 1);
+        assert!(matches!(answers_a[0].record, MdnsRecord::A { .. }));
+
+        // QTYPE 28 -> only AAAA
+        let wire_aaaa = build_wire_query(0, &[("dual.local", 28, 1)], &[]);
+        let query_aaaa = parse_mdns_query(&wire_aaaa, false).unwrap();
+        let answers_aaaa = resolve_mdns_query(&rules, &query_aaaa);
+        assert_eq!(answers_aaaa.len(), 1);
+        assert!(matches!(answers_aaaa[0].record, MdnsRecord::Aaaa { .. }));
+
+        // QTYPE 255 (ANY) -> both A and AAAA
+        let wire_any = build_wire_query(0, &[("dual.local", 255, 1)], &[]);
+        let query_any = parse_mdns_query(&wire_any, false).unwrap();
+        let answers_any = resolve_mdns_query(&rules, &query_any);
+        assert_eq!(answers_any.len(), 2);
+        assert!(
+            answers_any
+                .iter()
+                .any(|a| matches!(a.record, MdnsRecord::A { .. }))
+        );
+        assert!(
+            answers_any
+                .iter()
+                .any(|a| matches!(a.record, MdnsRecord::Aaaa { .. }))
+        );
+    }
+
+    #[test]
+    fn resolves_mdns_gui_name_for_aaaa_and_any() {
+        let rules = CompiledRules::with_builtin(vec![], "dns-shunt.local", 60);
+
+        // QTYPE 28 (AAAA) for dns-shunt.local returns ::1
+        let wire_aaaa = build_wire_query(0, &[("dns-shunt.local", 28, 1)], &[]);
+        let query_aaaa = parse_mdns_query(&wire_aaaa, false).unwrap();
+        let answers_aaaa = resolve_mdns_query(&rules, &query_aaaa);
+        assert_eq!(answers_aaaa.len(), 1);
+        assert_eq!(answers_aaaa[0].record.owner(), "dns-shunt.local");
+        assert!(answers_aaaa[0].contributing_rule.is_builtin);
+        match &answers_aaaa[0].record {
+            MdnsRecord::Aaaa { address, ttl, .. } => {
+                assert_eq!(*address, Ipv6Addr::LOCALHOST);
+                assert_eq!(*ttl, 60);
+            }
+            _ => panic!("expected AAAA record"),
+        }
+
+        // QTYPE 255 (ANY) for dns-shunt.local returns both 127.0.0.1 and ::1
+        let wire_any = build_wire_query(0, &[("dns-shunt.local", 255, 1)], &[]);
+        let query_any = parse_mdns_query(&wire_any, false).unwrap();
+        let answers_any = resolve_mdns_query(&rules, &query_any);
+        assert_eq!(answers_any.len(), 2);
+        assert!(answers_any.iter().all(|a| a.contributing_rule.is_builtin));
+        assert!(
+            answers_any
+                .iter()
+                .any(|a| matches!(a.record, MdnsRecord::A { .. }))
+        );
+        assert!(
+            answers_any
+                .iter()
+                .any(|a| matches!(a.record, MdnsRecord::Aaaa { .. }))
+        );
+    }
+
+    #[test]
+    fn resolves_mdns_cname_to_aaaa_target() {
+        let rules_vec = crate::config::validate_rules(
+            vec![
+                RuleInput {
+                    name: "target.local".into(),
+                    record_type: Some(RuleType::Aaaa),
+                    address: Some("2001:db8::cafe".into()),
+                    target: None,
+                    ttl: Some(70),
+                },
+                RuleInput {
+                    name: "alias.local".into(),
+                    record_type: Some(RuleType::Cname),
+                    address: None,
+                    target: Some("target.local".into()),
+                    ttl: Some(50),
+                },
+            ],
+            "dns-shunt.local",
+            60,
+        )
+        .unwrap();
+        let rules = CompiledRules::new(rules_vec);
+
+        // QTYPE 28 on alias.local emits CNAME and target AAAA
+        let wire = build_wire_query(0, &[("alias.local", 28, 1)], &[]);
+        let query = parse_mdns_query(&wire, false).unwrap();
+        let answers = resolve_mdns_query(&rules, &query);
+        assert_eq!(answers.len(), 2);
+        match &answers[0].record {
+            MdnsRecord::Cname { owner, target, ttl } => {
+                assert_eq!(owner, "alias.local");
+                assert_eq!(target, "target.local");
+                assert_eq!(*ttl, 50);
+            }
+            _ => panic!("expected CNAME record"),
+        }
+        match &answers[1].record {
+            MdnsRecord::Aaaa {
+                owner,
+                address,
+                ttl,
+            } => {
+                assert_eq!(owner, "target.local");
+                assert_eq!(*address, "2001:db8::cafe".parse::<Ipv6Addr>().unwrap());
+                assert_eq!(*ttl, 70);
+            }
+            _ => panic!("expected AAAA record"),
+        }
+
+        // QTYPE 255 on alias.local also emits CNAME and target AAAA
+        let wire_any = build_wire_query(0, &[("alias.local", 255, 1)], &[]);
+        let query_any = parse_mdns_query(&wire_any, false).unwrap();
+        let answers_any = resolve_mdns_query(&rules, &query_any);
+        assert_eq!(answers_any.len(), 2);
+        assert!(matches!(answers_any[0].record, MdnsRecord::Cname { .. }));
+        assert!(matches!(answers_any[1].record, MdnsRecord::Aaaa { .. }));
+    }
+
+    #[test]
+    fn suppresses_mdns_aaaa_known_answer() {
+        let rules_vec = crate::config::validate_rules(
+            vec![RuleInput {
+                name: "host.local".into(),
+                record_type: Some(RuleType::Aaaa),
+                address: Some("2001:db8::1".into()),
+                target: None,
+                ttl: Some(120),
+            }],
+            "dns-shunt.local",
+            60,
+        )
+        .unwrap();
+        let rules = CompiledRules::new(rules_vec);
+
+        let addr = "2001:db8::1".parse::<Ipv6Addr>().unwrap();
+        let octets = addr.octets();
+
+        // Known answer with TTL 60 (>= half emitted 120) suppresses answer
+        let wire_suppressed = build_wire_query(
+            0,
+            &[("host.local", 28, 1)],
+            &[("host.local", 28, 60, &octets)],
+        );
+        let query_suppressed = parse_mdns_query(&wire_suppressed, false).unwrap();
+        let answers = resolve_mdns_query(&rules, &query_suppressed);
+        assert!(answers.is_empty());
+
+        // Known answer with TTL 59 (< half emitted 120) does NOT suppress
+        let wire_emitted = build_wire_query(
+            0,
+            &[("host.local", 28, 1)],
+            &[("host.local", 28, 59, &octets)],
+        );
+        let query_emitted = parse_mdns_query(&wire_emitted, false).unwrap();
+        let answers_emitted = resolve_mdns_query(&rules, &query_emitted);
+        assert_eq!(answers_emitted.len(), 1);
     }
 }

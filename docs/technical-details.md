@@ -263,9 +263,28 @@ cargo run --bin dns-shunt -- --config .\dns-shunt.example.toml --run
 ```
 
 The WinDivert setup script validates the downloaded archive size and driver
-signature before staging its runtime files. It inspects only outbound,
-non-loopback IPv4 and IPv6 UDP DNS packets to port 53. TCP/53, inbound DNS, and
-loopback traffic are outside the interception scope.
-The CNAME behavior above applies only to intercepted unicast UDP/53 traffic.
-It does not add mDNS support: `.local` multicast queries on UDP/5353 remain
-outside this path and retain their distinct link-local resolution behavior.
+signature before staging its runtime files. It inspects outbound, non-loopback
+IPv4 and IPv6 UDP DNS packets to port 53 and mDNS packets to port 5353. TCP/53,
+inbound DNS, and loopback traffic are outside the interception scope.
+
+## Multicast DNS (mDNS) Interception
+
+`dns-shunt` intercepts outbound link-local mDNS queries on UDP/5353 across both
+IPv4 (`224.0.0.251:5353`) and IPv6 (`[ff02::fb]:5353`):
+
+- **Supported Record Types**: `A`, `AAAA`, and `CNAME` rules are evaluated for
+  mDNS queries.
+- **Question Types**: Answers `A` (QTYPE 1), `AAAA` (QTYPE 28), `CNAME` (QTYPE 5),
+  and `ANY` (QTYPE 255) questions against local rules.
+- **Dual-Stack Builtin GUI Hostname**: The reserved GUI hostname
+  (`dns-shunt.local`) synthesizes both `127.0.0.1` (`A`) and `::1` (`AAAA`)
+  records.
+- **CNAME Target Chaining**: Queries for `A`, `AAAA`, or `ANY` records pointing
+  to a CNAME rule synthesize both the CNAME record and the target's corresponding
+  `A` or `AAAA` address records when defined in local rules.
+- **Known-Answer Suppression**: Query known-answers suppress locally synthesized
+  records when the known-answer TTL is at least half of the emitted record TTL.
+- **Fail-Open Query Forwarding**: If a query contains questions that cannot be
+  completely answered by local rules (e.g., an `AAAA` query for a host that only
+  has an `A` rule, or multi-question queries with unmatched names), the original
+  packet is forwarded to the physical network link rather than suppressed.
