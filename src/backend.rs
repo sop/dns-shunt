@@ -137,20 +137,20 @@ fn process_mdns_query_packet(
 ) {
     let context = captured.context;
     let Some(payload_range) = captured.dns_payload else {
-        fail_open(backend, context, runtime, "invalid mDNS payload range");
+        fail_mdns_open(backend, &context, runtime, "invalid mDNS payload range");
         return;
     };
     let Some(payload) = context.original_packet.get(payload_range) else {
-        fail_open(
+        fail_mdns_open(
             backend,
-            context,
+            &context,
             runtime,
             "mDNS payload range out of bounds",
         );
         return;
     };
     let Some(tuple) = context.tuple else {
-        fail_open(backend, context, runtime, "missing flow tuple");
+        fail_mdns_open(backend, &context, runtime, "missing flow tuple");
         return;
     };
 
@@ -159,7 +159,7 @@ fn process_mdns_query_packet(
             ip_ttl = captured.ip_ttl,
             "mDNS query passed through (zero TTL)"
         );
-        let _ = backend.forward_query(&context);
+        forward_mdns_query(backend, &context, runtime);
         return;
     }
 
@@ -176,7 +176,7 @@ fn process_mdns_query_packet(
             source = %tuple.source,
             "mDNS query passed through (non-local or non-unicast source)"
         );
-        let _ = backend.forward_query(&context);
+        forward_mdns_query(backend, &context, runtime);
         return;
     }
 
@@ -188,28 +188,55 @@ fn process_mdns_query_packet(
             0
         };
         tracing::debug!(id, "mDNS query passed through (non-zero ID)");
-        let _ = backend.forward_query(&context);
+        forward_mdns_query(backend, &context, runtime);
         return;
     }
 
-    let query = match mdns::parse_mdns_query(payload, is_legacy) {
-        Ok(q) => q,
+    let parsed = match mdns::parse_mdns_questions(payload, is_legacy) {
+        Ok(parsed) => parsed,
         Err(
             err @ (mdns::MdnsError::Truncated
             | mdns::MdnsError::Probe
             | mdns::MdnsError::Unsupported),
         ) => {
             tracing::debug!(reason = ?err, "mDNS query passed through (forwarded)");
-            let _ = backend.forward_query(&context);
+            forward_mdns_query(backend, &context, runtime);
             return;
         }
         Err(mdns::MdnsError::Malformed) => {
-            fail_open(backend, context, runtime, "mDNS query malformed");
+            fail_mdns_open(backend, &context, runtime, "mDNS query malformed");
             return;
         }
     };
 
     let snapshot = runtime.rules.packet_snapshot();
+    let may_match = parsed.questions.iter().any(|question| {
+        question.qclass == 1
+            && !snapshot
+                .lookup_for_mdns(&question.name, question.qtype)
+                .is_empty()
+    });
+    if !may_match {
+        tracing::debug!(
+            questions = ?parsed.questions,
+            "mDNS query passed through (no matching local rules)"
+        );
+        forward_mdns_query(backend, &context, runtime);
+        return;
+    }
+
+    let query = match mdns::parse_mdns_records(payload, parsed) {
+        Ok(query) => query,
+        Err(mdns::MdnsError::Malformed) => {
+            fail_mdns_open(backend, &context, runtime, "mDNS query malformed");
+            return;
+        }
+        Err(error) => {
+            tracing::debug!(reason = ?error, "mDNS query passed through (forwarded)");
+            forward_mdns_query(backend, &context, runtime);
+            return;
+        }
+    };
     let candidates = mdns::resolve_mdns_query(&snapshot, &query);
 
     let all_matched = !query.questions.is_empty()
@@ -236,15 +263,7 @@ fn process_mdns_query_packet(
         });
     let none_matched = candidates.is_empty();
 
-    if (!all_matched || none_matched)
-        && let Err(error) = backend.forward_query(&context)
-    {
-        fail_open(
-            backend,
-            context,
-            runtime,
-            format!("failed to forward mDNS query: {error}"),
-        );
+    if (!all_matched || none_matched) && !forward_mdns_query(backend, &context, runtime) {
         return;
     }
 
@@ -267,6 +286,43 @@ fn process_mdns_query_packet(
     } else {
         mdns::dispatch_native_response(backend, runtime, &context, tuple, &candidates);
     }
+}
+
+fn forward_mdns_query(
+    backend: &dyn InterceptionBackend,
+    context: &FlowContext,
+    runtime: &RuntimeState,
+) -> bool {
+    match backend.forward_query(context) {
+        Ok(()) => true,
+        Err(first_error) => match backend.forward_query(context) {
+            Ok(()) => {
+                tracing::warn!(%first_error, "mDNS forwarding succeeded on retry");
+                true
+            }
+            Err(retry_error) => {
+                let error =
+                    format!("mDNS forwarding failed: {first_error}; retry failed: {retry_error}");
+                tracing::error!(%error, "mDNS packet could not be forwarded");
+                runtime.record_error(error);
+                runtime.record_fail_open();
+                false
+            }
+        },
+    }
+}
+
+fn fail_mdns_open(
+    backend: &dyn InterceptionBackend,
+    context: &FlowContext,
+    runtime: &RuntimeState,
+    error: impl Into<String>,
+) {
+    let error = error.into();
+    tracing::warn!(%error, "mDNS fail-open triggered");
+    runtime.record_error(error);
+    runtime.record_fail_open();
+    forward_mdns_query(backend, context, runtime);
 }
 
 fn process_unicast_dns_packet(
@@ -321,6 +377,16 @@ fn process_unicast_dns_packet(
         reinject_or_log(backend, context, runtime);
         return;
     };
+    if let Err(error) = dns::validate_query_sections(payload, &question) {
+        tracing::warn!(%error, "matched DNS query sections are malformed");
+        fail_open(
+            backend,
+            context,
+            runtime,
+            format!("DNS query section validation failed: {error}"),
+        );
+        return;
+    }
     let (answers, contributing_rules, builtin_hit) = match rule.record_type {
         crate::config::RuleType::A => {
             if question.qtype != 1 {
@@ -593,6 +659,8 @@ mod tests {
         raw_injected: Mutex<Vec<(Vec<u8>, bool)>>,
         fail_response: AtomicBool,
         fail_forward: AtomicBool,
+        fail_forward_once: AtomicBool,
+        forward_attempts: AtomicUsize,
     }
 
     impl InterceptionBackend for MockBackend {
@@ -625,7 +693,10 @@ mod tests {
         }
 
         fn forward_query(&self, context: &FlowContext) -> Result<(), BackendError> {
-            if self.fail_forward.load(Ordering::Relaxed) {
+            self.forward_attempts.fetch_add(1, Ordering::Relaxed);
+            if self.fail_forward.load(Ordering::Relaxed)
+                || self.fail_forward_once.swap(false, Ordering::Relaxed)
+            {
                 return Err(BackendError("mock forward failure".into()));
             }
             self.forwarded
@@ -908,6 +979,37 @@ mod tests {
         assert_eq!(status["overrides"], 0);
         assert_eq!(status["fail_open"], 0);
         assert!(status.get("forwarded").is_none());
+    }
+
+    #[test]
+    fn unmatched_supported_queries_skip_malformed_records_and_keep_packet_bytes() {
+        let (config, runtime) = runtime();
+        let backend = MockBackend::default();
+        let mut malformed = query(20, "other.example", 1, 1);
+        malformed[11] = 1;
+        malformed.extend_from_slice(&[0, 0, 41, 4, 208, 0, 0, 0, 0, 0, 8]);
+        let large_packet_payload = {
+            let mut payload = query(21, "other.example", 1, 1);
+            payload[10..12].copy_from_slice(&1u16.to_be_bytes());
+            payload.extend_from_slice(&[0, 0, 41, 4, 208, 0, 0, 0, 2, 4, 0, 12, 2, 0]);
+            payload.resize(payload.len() + 512, 0);
+            payload
+        };
+
+        for payload in [&malformed, &large_packet_payload] {
+            process_captured_packet(&backend, &config, &runtime, packet(Some(payload.clone())));
+        }
+
+        assert_eq!(
+            *backend.reinjections.lock().unwrap(),
+            vec![
+                Some(wire_packet(&malformed)),
+                Some(wire_packet(&large_packet_payload)),
+            ]
+        );
+        assert!(backend.responses.lock().unwrap().is_empty());
+        assert_eq!(runtime.status()["fail_open"], 0);
+        assert_eq!(runtime.status()["errors"], 0);
     }
 
     #[test]
@@ -1748,6 +1850,136 @@ mod tests {
             assert_eq!(backend.raw_injected.lock().unwrap().len(), 0);
             assert_eq!(runtime.status()["overrides"], 0);
         });
+    }
+
+    #[test]
+    fn mdns_unmatched_malformed_records_are_forwarded_without_fail_open_metrics() {
+        let (_config, runtime) = runtime();
+        let backend = Arc::new(MockBackend::default());
+        run_mdns_test(|interfaces| {
+            let mut payload = multi_query(0, &[("unmatched.local", 1, 1)]);
+            payload[6..8].copy_from_slice(&1u16.to_be_bytes());
+            payload.push(0xc0);
+            let captured = mdns_packet(
+                5353,
+                IpAddr::V4(mdns::MDNS_IPV4_ADDR),
+                5353,
+                payload,
+                255,
+                true,
+            );
+            let original = captured.context.original_packet.clone();
+            super::process_captured_packet(backend.as_ref(), &runtime, interfaces, captured);
+
+            assert_eq!(*backend.forwarded.lock().unwrap(), vec![original]);
+            assert!(backend.reinjections.lock().unwrap().is_empty());
+            assert_eq!(runtime.status()["fail_open"], 0);
+            assert_eq!(runtime.status()["errors"], 0);
+        });
+    }
+
+    #[test]
+    fn mdns_early_forwarding_branches_retry_without_unicast_reinjection() {
+        let nonzero_id = multi_query(1, &[("unmatched.local", 1, 1)]);
+        let mut truncated = multi_query(0, &[("unmatched.local", 1, 1)]);
+        truncated[2] |= 0x02;
+        let mut malformed_records = multi_query(0, &[("unmatched.local", 1, 1)]);
+        malformed_records[6..8].copy_from_slice(&1u16.to_be_bytes());
+        malformed_records.push(0xc0);
+
+        let packets = vec![
+            mdns_packet(
+                5353,
+                IpAddr::V4(mdns::MDNS_IPV4_ADDR),
+                5353,
+                multi_query(0, &[("matched.local", 1, 1)]),
+                0,
+                true,
+            ),
+            mdns_packet(
+                5353,
+                IpAddr::V4(mdns::MDNS_IPV4_ADDR),
+                5353,
+                nonzero_id,
+                255,
+                true,
+            ),
+            mdns_packet(
+                5353,
+                IpAddr::V4(mdns::MDNS_IPV4_ADDR),
+                5353,
+                truncated,
+                255,
+                true,
+            ),
+            mdns_packet(
+                5353,
+                IpAddr::V4(mdns::MDNS_IPV4_ADDR),
+                5353,
+                malformed_records,
+                255,
+                true,
+            ),
+        ];
+
+        run_mdns_test(|interfaces| {
+            for captured in packets {
+                let (_config, runtime) = runtime();
+                let backend = MockBackend::default();
+                backend.fail_forward_once.store(true, Ordering::Relaxed);
+                let original = captured.context.original_packet.clone();
+                super::process_captured_packet(&backend, &runtime, interfaces, captured);
+
+                assert_eq!(backend.forward_attempts.load(Ordering::Relaxed), 2);
+                assert_eq!(*backend.forwarded.lock().unwrap(), vec![original]);
+                assert!(backend.reinjections.lock().unwrap().is_empty());
+                assert_eq!(runtime.status()["fail_open"], 0);
+                assert_eq!(runtime.status()["errors"], 0);
+            }
+        });
+
+        let (_config, runtime) = runtime();
+        let backend = MockBackend::default();
+        backend.fail_forward_once.store(true, Ordering::Relaxed);
+        let interfaces = crate::interfaces::MockInterfaceProvider::new();
+        let captured = mdns_packet(
+            5353,
+            IpAddr::V4(mdns::MDNS_IPV4_ADDR),
+            5353,
+            multi_query(0, &[("unmatched.local", 1, 1)]),
+            255,
+            true,
+        );
+        let original = captured.context.original_packet.clone();
+        super::process_captured_packet(&backend, &runtime, &interfaces, captured);
+        assert_eq!(backend.forward_attempts.load(Ordering::Relaxed), 2);
+        assert_eq!(*backend.forwarded.lock().unwrap(), vec![original]);
+        assert!(backend.reinjections.lock().unwrap().is_empty());
+        assert_eq!(runtime.status()["errors"], 0);
+    }
+
+    #[test]
+    fn terminal_mdns_forwarding_failure_is_reported_without_reinjection() {
+        let (_config, runtime) = runtime();
+        let backend = MockBackend::default();
+        backend.fail_forward.store(true, Ordering::Relaxed);
+        run_mdns_test(|interfaces| {
+            let captured = mdns_packet(
+                5353,
+                IpAddr::V4(mdns::MDNS_IPV4_ADDR),
+                5353,
+                multi_query(0, &[("unmatched.local", 1, 1)]),
+                0,
+                true,
+            );
+            super::process_captured_packet(&backend, &runtime, interfaces, captured);
+        });
+
+        assert_eq!(backend.forward_attempts.load(Ordering::Relaxed), 2);
+        assert!(backend.forwarded.lock().unwrap().is_empty());
+        assert!(backend.reinjections.lock().unwrap().is_empty());
+        assert_eq!(runtime.status()["fail_open"], 1);
+        assert_eq!(runtime.status()["errors"], 1);
     }
 
     #[test]

@@ -1,12 +1,23 @@
 #![allow(dead_code)]
+#![allow(unused_imports)]
 
+#[path = "../src/admin.rs"]
+mod admin;
+#[path = "../src/backend.rs"]
+mod backend;
 #[path = "../src/config.rs"]
 mod config;
 #[allow(unused_imports)]
 #[path = "../src/dns.rs"]
 mod dns;
+#[path = "../src/interfaces.rs"]
+mod interfaces;
+#[path = "../src/mdns.rs"]
+mod mdns;
 #[path = "../src/packet.rs"]
 mod packet;
+#[path = "../src/rules.rs"]
+mod rules;
 
 use std::{
     hint::black_box,
@@ -26,6 +37,7 @@ fn main() {
     println!("interception microbench ({iterations} iterations per case)");
 
     bench_pass_through(iterations);
+    bench_mdns_pass_through(iterations);
     bench_unsupported_query_parse(iterations);
     bench_supported_query_classification(iterations);
     bench_rule_lookup(iterations);
@@ -50,7 +62,6 @@ fn bench_pass_through(iterations: usize) {
     benchmark_pass_through_packet(
         "typical-sized DNS packet",
         &small_packet,
-        dns_payload.len(),
         &rules,
         iterations,
     );
@@ -67,43 +78,22 @@ fn bench_pass_through(iterations: usize) {
         &padded_payload,
     )
     .unwrap();
-    benchmark_pass_through_packet(
-        "EDNS-padded DNS packet",
-        &large_packet,
-        padded_payload.len(),
-        &rules,
-        iterations,
-    );
+    benchmark_pass_through_packet("EDNS-padded DNS packet", &large_packet, &rules, iterations);
 }
 
 fn benchmark_pass_through_packet(
     label: &str,
     wire_packet: &[u8],
-    payload_len: usize,
     rules: &config::CompiledRules,
     iterations: usize,
 ) {
     println!("\nUnmatched A/IN pass-through ({label}):");
-    println!(
-        "  modeled copied bytes/op: current={}, owned-buffer={}",
-        wire_packet.len() * 2 + payload_len,
-        wire_packet.len()
-    );
+    println!("  modeled copied bytes/op: {}", wire_packet.len());
+    measure("receive-buffer copy only", iterations, || {
+        black_box(wire_packet.to_vec());
+    });
     measure(
-        "capture + payload copy + reinject clone",
-        iterations,
-        || {
-            let captured = wire_packet.to_vec();
-            let (tuple, payload) = packet::parse_ipv4_udp(&captured).unwrap();
-            let payload = payload.to_vec();
-            let question = dns::parse_query(&payload).unwrap();
-            black_box(rules.lookup_normalized(&question.name));
-            let reinjected = captured.clone();
-            black_box((tuple, question, reinjected));
-        },
-    );
-    measure(
-        "capture + borrowed payload + move to reinject",
+        "capture + full section validation + lookup",
         iterations,
         || {
             let captured = wire_packet.to_vec();
@@ -113,8 +103,85 @@ fn benchmark_pass_through_packet(
             else {
                 panic!("benchmark query should be eligible");
             };
-            black_box(rules.lookup_normalized(&question.name));
+            dns::validate_query_sections(payload, &question).unwrap();
+            black_box(rules.lookup_for_qtype(&question.name, question.qtype));
             black_box((tuple, question, captured));
+        },
+    );
+    measure(
+        "capture + question lookup + move to reinject",
+        iterations,
+        || {
+            let captured = wire_packet.to_vec();
+            let (tuple, payload) = packet::parse_ipv4_udp(&captured).unwrap();
+            let dns::QueryClassification::Eligible(question) =
+                dns::classify_query(payload).unwrap()
+            else {
+                panic!("benchmark query should be eligible");
+            };
+            black_box(rules.lookup_for_qtype(&question.name, question.qtype));
+            black_box((tuple, question, captured));
+        },
+    );
+}
+
+fn bench_mdns_pass_through(iterations: usize) {
+    let payload = mdns_query("unmatched.local", true);
+    let wire_packet = packet::build_ipv4_udp(
+        packet::FlowTuple {
+            source: std::net::IpAddr::V4(Ipv4Addr::new(192, 0, 2, 10)),
+            source_port: 53_535,
+            destination: std::net::IpAddr::V4(Ipv4Addr::new(224, 0, 0, 251)),
+            destination_port: 5353,
+        },
+        &payload,
+    )
+    .unwrap();
+    let rules = config::CompiledRules::new(Vec::new());
+
+    println!("\nmDNS no-rule pass-through:");
+    println!(
+        "  modeled copied bytes/op: old capture+clone={}, staged borrowed={}",
+        wire_packet.len() * 2,
+        wire_packet.len()
+    );
+    measure(
+        "full parse + rule lookup + forwarding clone",
+        iterations,
+        || {
+            let captured = wire_packet.to_vec();
+            let (_, dns_payload) = packet::parse_ipv4_udp(&captured).unwrap();
+            let query = mdns::parse_mdns_query(dns_payload, false).unwrap();
+            let candidates = mdns::resolve_mdns_query(&rules, &query);
+            let forwarded = captured.clone();
+            black_box((query, candidates, forwarded));
+        },
+    );
+    measure(
+        "full parse + rule lookup + borrowed forwarding",
+        iterations,
+        || {
+            let captured = wire_packet.to_vec();
+            let (_, dns_payload) = packet::parse_ipv4_udp(&captured).unwrap();
+            let query = mdns::parse_mdns_query(dns_payload, false).unwrap();
+            let candidates = mdns::resolve_mdns_query(&rules, &query);
+            black_box((query, candidates, captured));
+        },
+    );
+    measure(
+        "questions + no-rule lookup + borrowed forwarding",
+        iterations,
+        || {
+            let captured = wire_packet.to_vec();
+            let (_, dns_payload) = packet::parse_ipv4_udp(&captured).unwrap();
+            let parsed = mdns::parse_mdns_questions(dns_payload, false).unwrap();
+            let matched = parsed.questions.iter().any(|question| {
+                question.qclass == 1
+                    && !rules
+                        .lookup_for_mdns(&question.name, question.qtype)
+                        .is_empty()
+            });
+            black_box((matched, parsed, captured));
         },
     );
 }
@@ -385,5 +452,22 @@ fn dns_query_with_edns_padding(
     message.extend_from_slice(&[0, 0, 41, 4, 208, 0, 0, 0, 0]);
     message.extend_from_slice(&(padding_length as u16).to_be_bytes());
     message.resize(message.len() + padding_length, 0);
+    message
+}
+
+fn mdns_query(name: &str, include_known_answer: bool) -> Vec<u8> {
+    let mut message = vec![0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0];
+    for label in name.split('.') {
+        message.push(label.len() as u8);
+        message.extend_from_slice(label.as_bytes());
+    }
+    message.push(0);
+    message.extend_from_slice(&1u16.to_be_bytes());
+    message.extend_from_slice(&1u16.to_be_bytes());
+    if include_known_answer {
+        message[6..8].copy_from_slice(&1u16.to_be_bytes());
+        message.extend_from_slice(&[0xc0, 0x0c, 0, 1, 0, 1, 0, 0, 0, 30, 0, 4]);
+        message.extend_from_slice(&[192, 0, 2, 1]);
+    }
     message
 }

@@ -7,6 +7,7 @@ use crate::{
 use std::{
     collections::HashMap,
     net::{IpAddr, Ipv4Addr, Ipv6Addr},
+    ops::Range,
 };
 use thiserror::Error;
 
@@ -161,6 +162,15 @@ pub struct MdnsQuery {
     pub raw_questions_section: Vec<u8>,
 }
 
+pub(crate) struct ParsedMdnsQuestions {
+    pub(crate) id: u16,
+    pub(crate) is_legacy: bool,
+    pub(crate) questions: Vec<MdnsQuestion>,
+    questions_range: Range<usize>,
+    answer_count: usize,
+    additional_count: usize,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg(test)]
 pub struct MdnsResponseInfo {
@@ -168,7 +178,16 @@ pub struct MdnsResponseInfo {
     pub answers: Vec<MdnsRecord>,
 }
 
+#[allow(dead_code)]
 pub fn parse_mdns_query(message: &[u8], is_legacy: bool) -> Result<MdnsQuery, MdnsError> {
+    let parsed = parse_mdns_questions(message, is_legacy)?;
+    parse_mdns_records(message, parsed)
+}
+
+pub(crate) fn parse_mdns_questions(
+    message: &[u8],
+    is_legacy: bool,
+) -> Result<ParsedMdnsQuestions, MdnsError> {
     if message.len() < 12 {
         return Err(MdnsError::Malformed);
     }
@@ -224,18 +243,31 @@ pub fn parse_mdns_query(message: &[u8], is_legacy: bool) -> Result<MdnsQuery, Md
     }
 
     let questions_end = cursor;
-    let raw_questions_section = message[questions_start..questions_end].to_vec();
+    Ok(ParsedMdnsQuestions {
+        id,
+        is_legacy,
+        questions,
+        questions_range: questions_start..questions_end,
+        answer_count: ancount,
+        additional_count: arcount,
+    })
+}
 
+pub(crate) fn parse_mdns_records(
+    message: &[u8],
+    parsed: ParsedMdnsQuestions,
+) -> Result<MdnsQuery, MdnsError> {
+    let mut cursor = parsed.questions_range.end;
     // Parse known answers in Answer section
-    let mut known_answers = Vec::with_capacity(ancount);
-    for _ in 0..ancount {
+    let mut known_answers = Vec::with_capacity(parsed.answer_count);
+    for _ in 0..parsed.answer_count {
         let (record, next) = parse_record(message, cursor)?;
         known_answers.push(record);
         cursor = next;
     }
 
     // Skip/validate Additional records
-    for _ in 0..arcount {
+    for _ in 0..parsed.additional_count {
         let (_, next) = parse_record(message, cursor)?;
         cursor = next;
     }
@@ -244,10 +276,15 @@ pub fn parse_mdns_query(message: &[u8], is_legacy: bool) -> Result<MdnsQuery, Md
         return Err(MdnsError::Malformed);
     }
 
+    let raw_questions_section = if parsed.is_legacy {
+        message[parsed.questions_range].to_vec()
+    } else {
+        Vec::new()
+    };
     Ok(MdnsQuery {
-        id,
-        is_legacy,
-        questions,
+        id: parsed.id,
+        is_legacy: parsed.is_legacy,
+        questions: parsed.questions,
         known_answers,
         raw_questions_section,
     })
@@ -897,6 +934,29 @@ mod tests {
         assert_eq!(query.questions[1].qtype, 28);
         assert_eq!(query.questions[1].qclass, 1);
         assert!(query.questions[1].unicast_response);
+    }
+
+    #[test]
+    fn staged_parser_skips_records_for_misses_and_copies_legacy_questions_only() {
+        let mut wire = build_wire_query(0x1234, &[("example.local", 1, 1)], &[]);
+        let parsed = parse_mdns_questions(&wire, false).unwrap();
+        assert_eq!(parsed.questions.len(), 1);
+        assert!(
+            parse_mdns_records(&wire, parsed)
+                .unwrap()
+                .raw_questions_section
+                .is_empty()
+        );
+
+        let questions_end = wire.len();
+        wire[6..8].copy_from_slice(&1u16.to_be_bytes());
+        let parsed = parse_mdns_questions(&wire, false).unwrap();
+        assert_eq!(parse_mdns_records(&wire, parsed), Err(MdnsError::Malformed));
+
+        wire[6..8].copy_from_slice(&0u16.to_be_bytes());
+        let parsed = parse_mdns_questions(&wire, true).unwrap();
+        let query = parse_mdns_records(&wire, parsed).unwrap();
+        assert_eq!(query.raw_questions_section, wire[12..questions_end]);
     }
 
     #[test]

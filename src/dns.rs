@@ -64,8 +64,11 @@ pub(crate) fn classify_query(message: &[u8]) -> Result<QueryClassification, DnsE
     if !matches!(parsed.qtype, 1 | 5 | 28) || parsed.qclass != 1 {
         return Ok(QueryClassification::UnsupportedQuestion);
     }
-    validate_sections(message, parsed.question_end)?;
     Ok(QueryClassification::Eligible(parsed.materialize(message)))
+}
+
+pub(crate) fn validate_query_sections(message: &[u8], question: &Question) -> Result<(), DnsError> {
+    validate_sections(message, question.question_end)
 }
 
 fn parse_question(message: &[u8]) -> Result<ParsedQuestion, DnsError> {
@@ -510,7 +513,13 @@ mod tests {
 
         let qtype_offset = unsupported.len() - 11 - 4;
         unsupported[qtype_offset..qtype_offset + 2].copy_from_slice(&1u16.to_be_bytes());
-        assert_eq!(classify_query(&unsupported), Err(DnsError::Malformed));
+        let QueryClassification::Eligible(question) = classify_query(&unsupported).unwrap() else {
+            panic!("supported query should be eligible before section validation");
+        };
+        assert_eq!(
+            validate_query_sections(&unsupported, &question),
+            Err(DnsError::Malformed)
+        );
     }
 
     #[test]

@@ -36,6 +36,7 @@ enum ContextState {
     },
     MdnsQuery {
         forwarded: bool,
+        forwarding: bool,
         qm_sent: bool,
         qu_sent: bool,
     },
@@ -102,14 +103,20 @@ impl WinDivertDriver {
     }
 
     fn send(&self, packet: &WinDivertPacket<NetworkLayer>) -> Result<(), io::Error> {
+        self.send_raw(&packet.data, packet.address.as_ref())
+    }
+
+    fn send_raw<T>(&self, data: &[u8], address: &T) -> Result<(), io::Error> {
         let mut sent = 0;
+        // Callers provide WinDivert's native address value; both pointers live
+        // through this synchronous FFI call.
         let result = unsafe {
             WinDivertSend(
                 self.handle,
-                packet.data.as_ptr().cast(),
-                packet.data.len() as u32,
+                data.as_ptr().cast(),
+                data.len() as u32,
                 &mut sent,
-                packet.address.as_ref(),
+                (address as *const T).cast(),
             )
         };
         if !result.as_bool() {
@@ -195,6 +202,7 @@ impl InterceptionBackend for WinDivertBackend {
             backend::PacketKind::OutboundMdnsQuery => {
                 Arc::new(Mutex::new(ContextState::MdnsQuery {
                     forwarded: false,
+                    forwarding: false,
                     qm_sent: false,
                     qu_sent: false,
                 }))
@@ -330,30 +338,13 @@ impl InterceptionBackend for WinDivertBackend {
 
     fn forward_query(&self, context: &FlowContext) -> Result<(), BackendError> {
         let captured = validated_context(context)?;
-        {
-            let mut state = captured.state.lock().unwrap();
-            match &mut *state {
-                ContextState::MdnsQuery { forwarded, .. } => {
-                    if *forwarded {
-                        return Err(BackendError("mDNS query already forwarded".into()));
-                    }
-                    *forwarded = true;
-                }
-                _ => {
-                    return Err(BackendError(
-                        "invalid context state for forward_query".into(),
-                    ));
-                }
-            }
-        }
-        let mut packet =
-            unsafe { WinDivertPacket::<NetworkLayer>::new(context.original_packet.clone()) };
-        packet.address = captured.address.clone();
+        reserve_mdns_forward(&captured.state)?;
         tracing::trace!(?context.tuple, "WinDivert forwarding original mDNS query");
-        self.driver
-            .send(&packet)
-            .map_err(|error| BackendError(error.to_string()))?;
-        Ok(())
+        let result = self
+            .driver
+            .send_raw(&context.original_packet, captured.address.as_ref());
+        finish_mdns_forward(&captured.state, result.is_ok())?;
+        result.map_err(|error| BackendError(error.to_string()))
     }
 
     fn inject_raw_packet(
@@ -435,6 +426,47 @@ fn validated_context(context: &FlowContext) -> Result<&CapturedAddress, BackendE
         ));
     }
     Ok(captured)
+}
+
+fn reserve_mdns_forward(state: &Mutex<ContextState>) -> Result<(), BackendError> {
+    let mut state = state.lock().unwrap();
+    match &mut *state {
+        ContextState::MdnsQuery {
+            forwarded,
+            forwarding,
+            ..
+        } => {
+            if *forwarded || *forwarding {
+                return Err(BackendError("mDNS query already forwarded".into()));
+            }
+            *forwarding = true;
+            Ok(())
+        }
+        _ => Err(BackendError(
+            "invalid context state for forward_query".into(),
+        )),
+    }
+}
+
+fn finish_mdns_forward(state: &Mutex<ContextState>, succeeded: bool) -> Result<(), BackendError> {
+    let mut state = state.lock().unwrap();
+    match &mut *state {
+        ContextState::MdnsQuery {
+            forwarded,
+            forwarding,
+            ..
+        } => {
+            if !*forwarding {
+                return Err(BackendError("mDNS query is not forwarding".into()));
+            }
+            *forwarding = false;
+            *forwarded = succeeded;
+            Ok(())
+        }
+        _ => Err(BackendError(
+            "invalid context state after forward_query".into(),
+        )),
+    }
 }
 
 pub fn run(
@@ -553,6 +585,7 @@ mod tests {
             tuple: Some(tuple),
             state: Arc::new(Mutex::new(ContextState::MdnsQuery {
                 forwarded: false,
+                forwarding: false,
                 qm_sent: false,
                 qu_sent: false,
             })),
@@ -570,10 +603,12 @@ mod tests {
             match &mut *state {
                 ContextState::MdnsQuery {
                     forwarded,
+                    forwarding,
                     qm_sent,
                     qu_sent,
                 } => {
                     assert!(!*forwarded);
+                    assert!(!*forwarding);
                     assert!(!*qm_sent);
                     assert!(!*qu_sent);
                     *qm_sent = true;
@@ -586,15 +621,47 @@ mod tests {
             match &*state {
                 ContextState::MdnsQuery {
                     forwarded,
+                    forwarding,
                     qm_sent,
                     qu_sent,
                 } => {
                     assert!(!*forwarded);
+                    assert!(!*forwarding);
                     assert!(*qm_sent);
                     assert!(!*qu_sent);
                 }
                 _ => panic!("wrong state"),
             }
+        }
+    }
+
+    #[test]
+    fn failed_mdns_send_can_retry_but_success_cannot_be_duplicated() {
+        let state = Mutex::new(ContextState::MdnsQuery {
+            forwarded: false,
+            forwarding: false,
+            qm_sent: false,
+            qu_sent: false,
+        });
+
+        reserve_mdns_forward(&state).unwrap();
+        assert!(reserve_mdns_forward(&state).is_err());
+        finish_mdns_forward(&state, false).unwrap();
+        reserve_mdns_forward(&state).unwrap();
+        finish_mdns_forward(&state, true).unwrap();
+        assert!(reserve_mdns_forward(&state).is_err());
+
+        let state = state.lock().unwrap();
+        match &*state {
+            ContextState::MdnsQuery {
+                forwarded,
+                forwarding,
+                ..
+            } => {
+                assert!(*forwarded);
+                assert!(!*forwarding);
+            }
+            _ => panic!("wrong state"),
         }
     }
 }
