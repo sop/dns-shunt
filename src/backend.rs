@@ -203,8 +203,13 @@ fn process_mdns_query_packet(
             forward_mdns_query(backend, &context, runtime);
             return;
         }
-        Err(mdns::MdnsError::Malformed) => {
-            fail_mdns_open(backend, &context, runtime, "mDNS query malformed");
+        Err(error @ (mdns::MdnsError::Malformed | mdns::MdnsError::MalformedAt { .. })) => {
+            fail_mdns_open(
+                backend,
+                &context,
+                runtime,
+                mdns_malformed_error(payload, "question section", &error),
+            );
             return;
         }
     };
@@ -227,8 +232,13 @@ fn process_mdns_query_packet(
 
     let query = match mdns::parse_mdns_records(payload, parsed) {
         Ok(query) => query,
-        Err(mdns::MdnsError::Malformed) => {
-            fail_mdns_open(backend, &context, runtime, "mDNS query malformed");
+        Err(error @ (mdns::MdnsError::Malformed | mdns::MdnsError::MalformedAt { .. })) => {
+            fail_mdns_open(
+                backend,
+                &context,
+                runtime,
+                mdns_malformed_error(payload, "answer/additional section", &error),
+            );
             return;
         }
         Err(error) => {
@@ -323,6 +333,26 @@ fn fail_mdns_open(
     runtime.record_error(error);
     runtime.record_fail_open();
     forward_mdns_query(backend, context, runtime);
+}
+
+fn mdns_malformed_error(payload: &[u8], section: &str, error: &mdns::MdnsError) -> String {
+    let header = if payload.len() >= 12 {
+        format!(
+            ", id=0x{:04x}, qd={}, an={}, ns={}, ar={}",
+            u16::from_be_bytes([payload[0], payload[1]]),
+            u16::from_be_bytes([payload[4], payload[5]]),
+            u16::from_be_bytes([payload[6], payload[7]]),
+            u16::from_be_bytes([payload[8], payload[9]]),
+            u16::from_be_bytes([payload[10], payload[11]])
+        )
+    } else {
+        String::new()
+    };
+
+    format!(
+        "mDNS query malformed in {section}: {error} (payload_len={} bytes{header})",
+        payload.len()
+    )
 }
 
 fn process_unicast_dns_packet(

@@ -21,12 +21,21 @@ pub const MAX_LEGACY_TTL: u32 = 10;
 pub enum MdnsError {
     #[error("mDNS message is malformed or truncated")]
     Malformed,
+    #[error("malformed mDNS data at byte {offset}: {reason}")]
+    MalformedAt { offset: usize, reason: String },
     #[error("mDNS query has TC bit set")]
     Truncated,
     #[error("mDNS query has probe authority records")]
     Probe,
     #[error("mDNS query is unsupported")]
     Unsupported,
+}
+
+fn malformed_at(offset: usize, reason: impl Into<String>) -> MdnsError {
+    MdnsError::MalformedAt {
+        offset,
+        reason: reason.into(),
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -189,7 +198,10 @@ pub(crate) fn parse_mdns_questions(
     is_legacy: bool,
 ) -> Result<ParsedMdnsQuestions, MdnsError> {
     if message.len() < 12 {
-        return Err(MdnsError::Malformed);
+        return Err(malformed_at(
+            message.len(),
+            "DNS header is shorter than 12 bytes",
+        ));
     }
     let id = u16::from_be_bytes([message[0], message[1]]);
     let flags = u16::from_be_bytes([message[2], message[3]]);
@@ -227,7 +239,10 @@ pub(crate) fn parse_mdns_questions(
     for _ in 0..qdcount {
         let (name, next) = parse_name(message, cursor)?;
         if next + 4 > message.len() {
-            return Err(MdnsError::Malformed);
+            return Err(malformed_at(
+                next,
+                "question is missing its type or class fields",
+            ));
         }
         let qtype = u16::from_be_bytes([message[next], message[next + 1]]);
         let raw_class = u16::from_be_bytes([message[next + 2], message[next + 3]]);
@@ -273,7 +288,10 @@ pub(crate) fn parse_mdns_records(
     }
 
     if cursor != message.len() {
-        return Err(MdnsError::Malformed);
+        return Err(malformed_at(
+            cursor,
+            format!("{} unconsumed trailing bytes", message.len() - cursor),
+        ));
     }
 
     let raw_questions_section = if parsed.is_legacy {
@@ -293,7 +311,10 @@ pub(crate) fn parse_mdns_records(
 #[cfg(test)]
 pub fn parse_mdns_response(message: &[u8]) -> Result<MdnsResponseInfo, MdnsError> {
     if message.len() < 12 {
-        return Err(MdnsError::Malformed);
+        return Err(malformed_at(
+            message.len(),
+            "DNS header is shorter than 12 bytes",
+        ));
     }
     let id = u16::from_be_bytes([message[0], message[1]]);
     let flags = u16::from_be_bytes([message[2], message[3]]);
@@ -316,7 +337,10 @@ pub fn parse_mdns_response(message: &[u8]) -> Result<MdnsResponseInfo, MdnsError
     for _ in 0..qdcount {
         let (_, next) = parse_name(message, cursor)?;
         if next + 4 > message.len() {
-            return Err(MdnsError::Malformed);
+            return Err(malformed_at(
+                next,
+                "question is missing its type or class fields",
+            ));
         }
         cursor = next + 4;
     }
@@ -341,7 +365,10 @@ pub fn parse_mdns_response(message: &[u8]) -> Result<MdnsResponseInfo, MdnsError
     }
 
     if cursor != message.len() {
-        return Err(MdnsError::Malformed);
+        return Err(malformed_at(
+            cursor,
+            format!("{} unconsumed trailing bytes", message.len() - cursor),
+        ));
     }
 
     Ok(MdnsResponseInfo { id, answers })
@@ -350,7 +377,10 @@ pub fn parse_mdns_response(message: &[u8]) -> Result<MdnsResponseInfo, MdnsError
 fn parse_record(message: &[u8], offset: usize) -> Result<(MdnsRecord, usize), MdnsError> {
     let (owner, next) = parse_name(message, offset)?;
     if next + 10 > message.len() {
-        return Err(MdnsError::Malformed);
+        return Err(malformed_at(
+            next,
+            "resource record is missing its fixed header",
+        ));
     }
     let rr_type = u16::from_be_bytes([message[next], message[next + 1]]);
     let class_raw = u16::from_be_bytes([message[next + 2], message[next + 3]]);
@@ -360,7 +390,13 @@ fn parse_record(message: &[u8], offset: usize) -> Result<(MdnsRecord, usize), Md
     let rdata_start = next + 10;
     let rdata_end = rdata_start + rdlength;
     if rdata_end > message.len() {
-        return Err(MdnsError::Malformed);
+        return Err(malformed_at(
+            rdata_start,
+            format!(
+                "resource record RDATA declares {rdlength} bytes, only {} remain",
+                message.len().saturating_sub(rdata_start)
+            ),
+        ));
     }
 
     let record = match rr_type {
@@ -380,7 +416,7 @@ fn parse_record(message: &[u8], offset: usize) -> Result<(MdnsRecord, usize), Md
         28 if rdlength == 16 => {
             let octets: [u8; 16] = message[rdata_start..rdata_end]
                 .try_into()
-                .map_err(|_| MdnsError::Malformed)?;
+                .map_err(|_| malformed_at(rdata_start, "invalid AAAA record length"))?;
             MdnsRecord::Aaaa {
                 owner,
                 address: Ipv6Addr::from(octets),
@@ -419,16 +455,18 @@ fn parse_name(message: &[u8], offset: usize) -> Result<(String, usize), MdnsErro
     let mut cursor = offset;
     let mut resume = None;
     let mut steps = 0;
-    // Built in place: labels are validated as ASCII before they are appended.
+    // Build a safe textual form in place, escaping bytes outside rule names.
     let mut name = String::new();
     let mut wire_len = 0;
 
     loop {
         steps += 1;
         if steps > message.len() {
-            return Err(MdnsError::Malformed);
+            return Err(malformed_at(cursor, "name compression pointer loop"));
         }
-        let length = *message.get(cursor).ok_or(MdnsError::Malformed)?;
+        let length = *message
+            .get(cursor)
+            .ok_or_else(|| malformed_at(cursor, "missing name label or terminator"))?;
         match length & 0xc0 {
             0 => {
                 cursor += 1;
@@ -437,42 +475,52 @@ fn parse_name(message: &[u8], offset: usize) -> Result<(String, usize), MdnsErro
                 }
                 let len = length as usize;
                 if len > 63 || cursor + len > message.len() {
-                    return Err(MdnsError::Malformed);
+                    return Err(malformed_at(cursor - 1, "label exceeds message bounds"));
                 }
                 let label_bytes = &message[cursor..cursor + len];
-                for &b in label_bytes {
-                    if !b.is_ascii_alphanumeric() && b != b'-' && b != b'_' {
-                        return Err(MdnsError::Malformed);
-                    }
-                }
                 wire_len += len + 1;
                 if wire_len > 254 {
-                    return Err(MdnsError::Malformed);
+                    return Err(malformed_at(cursor, "domain name exceeds 255 wire bytes"));
                 }
                 if !name.is_empty() {
                     name.push('.');
                 }
-                // Validated above to be ASCII, so this is always valid UTF-8.
-                name.extend(
-                    label_bytes
-                        .iter()
-                        .map(|&b| char::from(b.to_ascii_lowercase())),
-                );
+                for &byte in label_bytes {
+                    append_label_byte(&mut name, byte);
+                }
                 cursor += len;
             }
             0xc0 => {
-                let low = *message.get(cursor + 1).ok_or(MdnsError::Malformed)?;
+                let low = *message
+                    .get(cursor + 1)
+                    .ok_or_else(|| malformed_at(cursor, "truncated compression pointer"))?;
                 let target = (((length & 0x3f) as usize) << 8) | low as usize;
                 if target >= message.len() {
-                    return Err(MdnsError::Malformed);
+                    return Err(malformed_at(
+                        cursor,
+                        format!("compression pointer target {target} is out of bounds"),
+                    ));
                 }
                 if resume.is_none() {
                     resume = Some(cursor + 2);
                 }
                 cursor = target;
             }
-            _ => return Err(MdnsError::Malformed),
+            _ => return Err(malformed_at(cursor, "reserved DNS label encoding")),
         }
+    }
+}
+
+fn append_label_byte(name: &mut String, byte: u8) {
+    if byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_' {
+        name.push(char::from(byte.to_ascii_lowercase()));
+    } else {
+        // DNS labels may contain arbitrary octets. Escape bytes outside the
+        // rule-name alphabet so they cannot become separators or match rules.
+        name.push('\\');
+        name.push(char::from(b'0' + byte / 100));
+        name.push(char::from(b'0' + (byte / 10) % 10));
+        name.push(char::from(b'0' + byte % 10));
     }
 }
 
@@ -937,6 +985,17 @@ mod tests {
     }
 
     #[test]
+    fn parses_and_escapes_otherwise_valid_label_bytes() {
+        let mut wire = build_wire_query(0x1234, &[("space-name.local", 1, 1)], &[]);
+        wire[12 + 1 + "space".len()] = b' ';
+        wire[12 + 1 + "space-".len()] = b'(';
+
+        let parsed = parse_mdns_questions(&wire, false).unwrap();
+
+        assert_eq!(parsed.questions[0].name, r"space\032\040ame.local");
+    }
+
+    #[test]
     fn staged_parser_skips_records_for_misses_and_copies_legacy_questions_only() {
         let mut wire = build_wire_query(0x1234, &[("example.local", 1, 1)], &[]);
         let parsed = parse_mdns_questions(&wire, false).unwrap();
@@ -951,7 +1010,11 @@ mod tests {
         let questions_end = wire.len();
         wire[6..8].copy_from_slice(&1u16.to_be_bytes());
         let parsed = parse_mdns_questions(&wire, false).unwrap();
-        assert_eq!(parse_mdns_records(&wire, parsed), Err(MdnsError::Malformed));
+        assert!(matches!(
+            parse_mdns_records(&wire, parsed),
+            Err(MdnsError::MalformedAt { reason, .. })
+                if reason == "missing name label or terminator"
+        ));
 
         wire[6..8].copy_from_slice(&0u16.to_be_bytes());
         let parsed = parse_mdns_questions(&wire, true).unwrap();

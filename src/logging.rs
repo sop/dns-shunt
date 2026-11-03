@@ -74,7 +74,11 @@ pub fn init_service(
 ) -> Result<WorkerGuard, Box<dyn Error + Send + Sync>> {
     fs::create_dir_all(log_dir)?;
 
-    let file_appender = tracing_appender::rolling::daily(log_dir, "dns-shunt.log");
+    let file_appender = tracing_appender::rolling::Builder::new()
+        .rotation(tracing_appender::rolling::Rotation::DAILY)
+        .filename_prefix("dns-shunt")
+        .filename_suffix("log")
+        .build(log_dir)?;
     let (non_blocking, guard) = tracing_appender::non_blocking(file_appender);
     let filter = EnvFilter::try_new(level).unwrap_or_else(|_| EnvFilter::new("info"));
 
@@ -87,7 +91,7 @@ pub fn init_service(
     Ok(guard)
 }
 
-/// Prunes log files matching `dns-shunt.log*` in `log_dir` older than `max_age_days`.
+/// Prunes dated DNS Shunt logs in `log_dir` older than `max_age_days`.
 /// Passing `max_age_days = 0` disables pruning and returns `Ok(0)`.
 pub fn prune_old_logs(log_dir: &Path, max_age_days: u32) -> io::Result<usize> {
     if max_age_days == 0 {
@@ -129,7 +133,9 @@ pub fn prune_old_logs(log_dir: &Path, max_age_days: u32) -> io::Result<usize> {
 
         let file_name = entry.file_name();
         let name_str = file_name.to_string_lossy();
-        if !name_str.starts_with("dns-shunt.log") {
+        let is_current_log = name_str.starts_with("dns-shunt.") && name_str.ends_with(".log");
+        let is_legacy_log = name_str.starts_with("dns-shunt.log.");
+        if !is_current_log && !is_legacy_log {
             continue;
         }
 
@@ -267,12 +273,14 @@ mod tests {
         let temp_dir = std::env::temp_dir().join(format!("dns_shunt_prune_test_{unique}"));
         fs::create_dir_all(&temp_dir).unwrap();
 
-        let old_file = temp_dir.join("dns-shunt.log.2026-01-01");
-        let recent_file = temp_dir.join("dns-shunt.log.2026-10-31");
+        let old_file = temp_dir.join("dns-shunt.2026-01-01.log");
+        let recent_file = temp_dir.join("dns-shunt.2026-10-31.log");
+        let legacy_file = temp_dir.join("dns-shunt.log.2026-01-01");
         let other_old_file = temp_dir.join("other-service.log.2026-01-01");
 
         File::create(&old_file).unwrap();
         File::create(&recent_file).unwrap();
+        File::create(&legacy_file).unwrap();
         File::create(&other_old_file).unwrap();
 
         // Set times: old files 30 days ago
@@ -286,6 +294,12 @@ mod tests {
             .unwrap();
         fs::OpenOptions::new()
             .write(true)
+            .open(&legacy_file)
+            .unwrap()
+            .set_times(times)
+            .unwrap();
+        fs::OpenOptions::new()
+            .write(true)
             .open(&other_old_file)
             .unwrap()
             .set_times(times)
@@ -293,10 +307,11 @@ mod tests {
 
         // Prune older than 7 days
         let pruned = prune_old_logs(&temp_dir, 7).unwrap();
-        assert_eq!(pruned, 1);
+        assert_eq!(pruned, 2);
 
         assert!(!old_file.exists());
         assert!(recent_file.exists());
+        assert!(!legacy_file.exists());
         assert!(other_old_file.exists());
 
         let _ = fs::remove_dir_all(&temp_dir);
