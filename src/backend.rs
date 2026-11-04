@@ -166,7 +166,7 @@ fn process_mdns_query_packet(
     if captured.ip_ttl != 255 {
         tracing::debug!(
             ip_ttl = captured.ip_ttl,
-            "mDNS query has non-standard TTL (allowed leniently)"
+            "mDNS query has non-standard TTL"
         );
     }
 
