@@ -225,7 +225,7 @@ Get-WinEvent -FilterHashtable @{ LogName = 'Application'; ProviderName = 'Dns-Sh
 ```
 
 Detailed operational logs are stored in daily rolling files under
-`%ProgramData%\dns-shunt\logs\dns-shunt.log.<YYYY-MM-DD>`. File logs exclude
+`%ProgramData%\dns-shunt\logs\dns-shunt.<YYYY-MM-DD>.log`. File logs exclude
 ANSI escape sequences and are automatically pruned according to
 `log_retention_days` (defaulting to 7 days). Setting `log_level = "debug"`
 enables structured packet disposition logging, recording whether each
