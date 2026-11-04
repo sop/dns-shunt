@@ -227,11 +227,16 @@
         font-size: 12px;
       }
 
-      form {
+      #rule-form {
         display: grid;
-        grid-template-columns: 1.1fr 105px minmax(130px, 1fr) 90px auto;
+        grid-template-columns: 1.1fr 105px minmax(130px, 1fr) 90px;
         gap: 8px;
         margin-bottom: 16px;
+      }
+
+      #rule-form .form-actions {
+        grid-column: 1 / -1;
+        justify-content: flex-end;
       }
 
       input,
@@ -268,6 +273,10 @@
       .form-actions {
         display: flex;
         gap: 8px;
+      }
+
+      #rule-form .form-actions button {
+        padding: 6px 10px;
       }
 
       button.edit,
@@ -376,6 +385,15 @@
         text-align: right;
       }
 
+      .app-footer a {
+        color: inherit;
+        text-underline-offset: 2px;
+      }
+
+      .app-footer a:hover {
+        color: var(--acid);
+      }
+
       @media (max-width: 780px) {
         main {
           padding: 22px 14px;
@@ -389,7 +407,7 @@
           grid-template-columns: 1fr;
         }
 
-        form {
+        #rule-form {
           grid-template-columns: 1fr 1fr;
         }
 
@@ -414,7 +432,7 @@
           font-size: 12px;
         }
 
-        form {
+        #rule-form {
           grid-template-columns: 1fr;
         }
 
@@ -463,19 +481,19 @@
 
       <div class="grid">
         <div class="card">
-          <div class="label">Override answers</div>
+          <div class="label" title="Responses synthesized from matching override rules or built-in records.">Override answers</div>
           <div class="value" id="overrides">0</div>
         </div>
         <div class="card">
-          <div class="label">Fail-open</div>
+          <div class="label" title="Packets passed through without an override because they could not be handled safely.">Fail-open</div>
           <div class="value" id="failopen">0</div>
         </div>
         <div class="card">
-          <div class="label">Errors</div>
+          <div class="label" title="Errors recorded by the service, including packet-handling and service errors.">Errors</div>
           <div class="value" id="errors">0</div>
         </div>
         <div class="card">
-          <div class="label">Uptime</div>
+          <div class="label" title="Time since the service started; resets when the service restarts.">Uptime</div>
           <div class="value" id="uptime">Indeterminate</div>
         </div>
       </div>
@@ -538,7 +556,13 @@
         </aside>
       </div>
 
-      <footer class="app-footer">DNS Shunt v{{VERSION}}</footer>
+      <footer class="app-footer">
+        DNS Shunt v{{VERSION}} &middot;
+        <a href="https://sop.github.io/dns-shunt/" target="_blank"
+          rel="noopener noreferrer">Homepage</a> &middot;
+        <a href="https://github.com/sop/dns-shunt/releases" target="_blank"
+          rel="noopener noreferrer">Releases</a>
+      </footer>
     </main>
 
     <script>
@@ -811,9 +835,7 @@
           form.elements.address.value = rule.address || '';
           form.elements.target.value = rule.target || '';
           form.elements.ttl.value = rule.ttl;
-          form.querySelector('button[type=submit]').textContent =
-            'Save changes';
-          $('cancel-edit').hidden = false;
+          setRuleFormMode(true);
           form.elements.name.focus();
         } else if (button.classList.contains('delete')) {
           try {
@@ -831,8 +853,13 @@
         form.reset();
         form.querySelector('[name="index"]').value = '';
         updateRuleDataField();
-        form.querySelector('button[type=submit]').textContent = 'Add rule +';
-        $('cancel-edit').hidden = true;
+        setRuleFormMode(false);
+      }
+
+      function setRuleFormMode(editing) {
+        $('rule-form').querySelector('button[type=submit]').textContent =
+          editing ? 'Save changes' : 'Add rule +';
+        $('cancel-edit').hidden = !editing;
       }
 
       $('cancel-edit').addEventListener('click', () => {
