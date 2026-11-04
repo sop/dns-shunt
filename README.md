@@ -13,22 +13,25 @@ IPv6 addresses, or local CNAME targets without changing your Windows DNS setting
 - Intercept outbound standard unicast DNS (UDP/53) and multicast DNS (mDNS
   on UDP/5353) across IPv4 and IPv6.
 - Dual-stack support: A and AAAA rules for the same domain or wildcard can
-  coexist. Queries for unconfigured address families pass through fail-open to
-  upstream resolvers.
+  coexist. For standard DNS, queries for an unconfigured address family pass
+  through fail-open to the resolver selected by Windows.
 - Run as a Windows service with a notification-area tray app, or run it
   manually when needed.
-- View current-run activity, uptime, fail-open queries, errors, and rule hit
-  counts. DNS query names are not retained.
+- View current-run activity, uptime, fail-open counts, errors, and rule hits.
+  Query names are not part of the dashboard statistics, but debug logs include
+  DNS and mDNS question names.
 
-DNS Shunt only handles supported matching DNS and mDNS requests. Other requests
-are passed through unchanged, and Windows continues to choose the DNS resolver.
-The app does not change network adapter settings or configure a resolver.
-CNAME chains are resolved locally when they reach a matching A or AAAA rule;
-if a target is not locally ruled, DNS Shunt returns the known CNAME chain
-without querying upstream. The client may then look up that target through the
-unchanged DNS path. For mDNS, outbound link-local queries on UDP/5353 across
-IPv4 (224.0.0.251) and IPv6 ([ff02::fb]) support A, AAAA, CNAME, and ANY
-questions with known-answer suppression and fail-open forwarding.
+DNS Shunt only handles supported matching DNS and mDNS requests. Unmatched
+unicast DNS follows the resolver path selected by Windows; unmatched mDNS is
+forwarded on its multicast link. The app does not change network adapter
+settings or configure a resolver. For standard DNS, CNAME chains are resolved
+locally when they reach a matching A or AAAA rule; if a target is not locally
+ruled, DNS Shunt returns the known CNAME chain without querying upstream. The
+client may then look up that target through the unchanged DNS path. For mDNS,
+outbound link-local queries on UDP/5353 across IPv4 (224.0.0.251) and IPv6
+([ff02::fb]) support A, AAAA, CNAME, and ANY questions with known-answer
+suppression and fail-open forwarding. An mDNS CNAME answer may include an
+exact-name A or AAAA rule for its target.
 
 ## Use Cases
 

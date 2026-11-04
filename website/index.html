@@ -92,11 +92,19 @@
               </span>
             </div>
             <div class="route route-pass">
-              <span class="route-label">EVERYTHING ELSE</span>
-              <strong>Other DNS &amp; mDNS requests</strong>
+              <span class="route-label">UNMATCHED UNICAST DNS</span>
+              <strong>Other DNS requests</strong>
               <span class="route-line" aria-hidden="true"></span>
               <span class="route-target">
                 <b>&rarr;</b> Windows-selected resolver
+              </span>
+            </div>
+            <div class="route route-pass">
+              <span class="route-label">UNMATCHED mDNS</span>
+              <strong>Other multicast DNS requests</strong>
+              <span class="route-line" aria-hidden="true"></span>
+              <span class="route-target">
+                <b>&rarr;</b> multicast link, unchanged
               </span>
             </div>
             <p class="note-foot">
@@ -111,17 +119,18 @@
             <h2>A, AAAA &amp; CNAME rules.</h2>
             <p>
               Create IPv4 (A), IPv6 (AAAA), and CNAME alias rules with exact or
-              wildcard matching. Dual-stack rules coexist cleanly, and local
-              CNAME chains resolve directly to matching address targets.
+              wildcard matching. Dual-stack rules coexist cleanly. Standard
+              DNS follows local CNAME chains; mDNS can include a directly ruled
+              address target.
             </p>
           </article>
           <article class="detail-card">
             <span class="index">02 / PASS THROUGH</span>
             <h2>Your DNS stays yours.</h2>
             <p>
-              Unmatched queries, unconfigured record types, and unsupported
-              requests pass through unchanged. Windows continues to choose the
-              resolver; DNS Shunt never alters adapter settings.
+              Unmatched unicast DNS follows Windows' selected resolver.
+              Unmatched mDNS continues over its multicast link. DNS Shunt never
+              alters adapter settings or resolver selection.
             </p>
           </article>
           <article class="detail-card">

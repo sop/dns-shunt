@@ -181,8 +181,9 @@ back into a CNAME loop are rejected.
 Corrupt or unreadable stores fail startup rather than silently disabling
 overrides. Aggregate override, fail-open, and error counters, uptime, and
 per-rule hit counts cover only the current run and are not written to disk;
-individual query names are never retained. TTL, GUI name, and HTTP port remain
-read-only TOML settings.
+query names are not part of those statistics. Debug-level packet logs include
+DNS and mDNS question names; service logs remain on disk until pruned. TTL, GUI
+name, and HTTP port remain read-only TOML settings.
 
 ## Windows Service
 
@@ -282,9 +283,10 @@ IPv4 (`224.0.0.251:5353`) and IPv6 (`[ff02::fb]:5353`):
 - **Dual-Stack Builtin GUI Hostname**: The reserved GUI hostname
   (`dns-shunt.local`) synthesizes both `127.0.0.1` (`A`) and `::1` (`AAAA`)
   records.
-- **CNAME Target Chaining**: Queries for `A`, `AAAA`, or `ANY` records pointing
-  to a CNAME rule synthesize both the CNAME record and the target's corresponding
-  `A` or `AAAA` address records when defined in local rules.
+- **CNAME Target Address Records**: Queries for `A`, `AAAA`, or `ANY` records
+  pointing to a CNAME rule may include the CNAME and its directly configured,
+  exact-name `A` or `AAAA` target record. mDNS does not follow a target CNAME
+  or resolve wildcard address rules for the target.
 - **Known-Answer Suppression**: Query known-answers suppress locally synthesized
   records when the known-answer TTL is at least half of the emitted record TTL.
 - **Fail-Open Query Forwarding**: If a query contains questions that cannot be
