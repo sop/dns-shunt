@@ -15,9 +15,15 @@ IPv6 addresses, or local CNAME targets without changing your Windows DNS setting
 - Dual-stack support: A and AAAA rules for the same domain or wildcard can
   coexist. For standard DNS, queries for an unconfigured address family pass
   through fail-open to the resolver selected by Windows.
+- An exact-name rule takes precedence over wildcard rules for every query type.
+  If its record type does not match the query, the query passes through rather
+  than falling back to a wildcard rule.
 - Run as a Windows service with a notification-area tray app, or run it
   manually when needed.
-- View current-run activity, uptime, fail-open counts, errors, and rule hits.
+- View current-run activity, uptime, passed-through and fail-open counts,
+  errors, and rule hits. Passed-through counts DNS/mDNS requests successfully
+  sent onward when local rules did not fully handle them; fail-open recovery is
+  excluded.
   Query names are not part of the dashboard statistics, but debug logs include
   DNS and mDNS question names.
 

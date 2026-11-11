@@ -33,6 +33,7 @@ pub struct RuntimeState {
     error_callback: Mutex<Option<ErrorCallback>>,
     overrides: AtomicU64,
     builtin_hits: AtomicU64,
+    passed_through: AtomicU64,
     fail_open: AtomicU64,
     errors: AtomicU64,
     rule_hits: Mutex<HashMap<String, u64>>,
@@ -77,6 +78,7 @@ impl RuntimeState {
             error_callback: Mutex::new(None),
             overrides: AtomicU64::new(0),
             builtin_hits: AtomicU64::new(0),
+            passed_through: AtomicU64::new(0),
             fail_open: AtomicU64::new(0),
             errors: AtomicU64::new(0),
             rule_hits: Mutex::new(HashMap::new()),
@@ -195,6 +197,18 @@ impl RuntimeState {
         }
         self.notify_stats_changed();
     }
+
+    pub fn record_passed_through(&self) {
+        {
+            let _stats = self
+                .stats_lock
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            self.passed_through.fetch_add(1, Ordering::Relaxed);
+        }
+        self.notify_stats_changed();
+    }
+
     pub fn record_error(&self, error: impl Into<String>) {
         let error = error.into();
         {
@@ -249,6 +263,7 @@ impl RuntimeState {
         json!({
             "overrides": self.overrides.load(Ordering::Relaxed),
             "builtin_hits": self.builtin_hits.load(Ordering::Relaxed),
+            "passed_through": self.passed_through.load(Ordering::Relaxed),
             "fail_open": self.fail_open.load(Ordering::Relaxed),
             "errors": self.errors.load(Ordering::Relaxed),
             "last_error": self
@@ -271,6 +286,7 @@ impl RuntimeState {
             "backend": self.backend,
             "overrides": self.overrides.load(Ordering::Relaxed),
             "builtin_hits": self.builtin_hits.load(Ordering::Relaxed),
+            "passed_through": self.passed_through.load(Ordering::Relaxed),
             "fail_open": self.fail_open.load(Ordering::Relaxed),
             "errors": self.errors.load(Ordering::Relaxed),
             "last_error": self
@@ -1394,6 +1410,7 @@ mod tests {
         let status = state.status();
         assert_eq!(status["overrides"], 1);
         assert_eq!(status["builtin_hits"], 0);
+        assert_eq!(status["passed_through"], 0);
         assert!(status.get("forwarded").is_none());
         assert!(status["settings"].get("upstream").is_none());
         assert!(status["settings"].get("source_port").is_none());
@@ -1401,6 +1418,7 @@ mod tests {
         assert_eq!(state.statistics_snapshot()["rule_hits"]["hit.example"], 1);
         let restarted = runtime();
         assert_eq!(restarted.status()["overrides"], 0);
+        assert_eq!(restarted.status()["passed_through"], 0);
         assert!(DASHBOARD.contains("/api/status"));
         assert!(!DASHBOARD.contains("Forwarded upstream"));
     }
@@ -1424,15 +1442,18 @@ mod tests {
 
         state.record_override(&rule);
         state.record_builtin_override();
+        state.record_passed_through();
         state.record_fail_open();
         state.record_error("test error");
 
         let events = state.event_state.lock().unwrap();
-        assert_eq!(events.stats_version, 4);
+        assert_eq!(events.stats_version, 5);
         let snapshot = state.statistics_snapshot();
         assert_eq!(snapshot["overrides"], 2);
         assert_eq!(snapshot["builtin_hits"], 1);
         assert_eq!(state.status()["builtin_hits"], 1);
+        assert_eq!(snapshot["passed_through"], 1);
+        assert_eq!(state.status()["passed_through"], 1);
         assert_eq!(snapshot["fail_open"], 1);
         assert_eq!(snapshot["errors"], 1);
         assert_eq!(snapshot["last_error"], "test error");

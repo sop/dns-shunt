@@ -159,15 +159,12 @@ fn process_mdns_query_packet(
             ip_ttl = captured.ip_ttl,
             "mDNS query passed through (zero TTL)"
         );
-        forward_mdns_query(backend, &context, runtime);
+        forward_mdns_passthrough(backend, &context, runtime);
         return;
     }
 
     if captured.ip_ttl != 255 {
-        tracing::debug!(
-            ip_ttl = captured.ip_ttl,
-            "mDNS query has non-standard TTL"
-        );
+        tracing::debug!(ip_ttl = captured.ip_ttl, "mDNS query has non-standard TTL");
     }
 
     if !interfaces.has_unicast_source(context.interface_index, tuple.source) {
@@ -176,7 +173,7 @@ fn process_mdns_query_packet(
             source = %tuple.source,
             "mDNS query passed through (non-local or non-unicast source)"
         );
-        forward_mdns_query(backend, &context, runtime);
+        forward_mdns_passthrough(backend, &context, runtime);
         return;
     }
 
@@ -188,7 +185,7 @@ fn process_mdns_query_packet(
             0
         };
         tracing::debug!(id, "mDNS query passed through (non-zero ID)");
-        forward_mdns_query(backend, &context, runtime);
+        forward_mdns_passthrough(backend, &context, runtime);
         return;
     }
 
@@ -200,7 +197,7 @@ fn process_mdns_query_packet(
             | mdns::MdnsError::Unsupported),
         ) => {
             tracing::debug!(reason = ?err, "mDNS query passed through (forwarded)");
-            forward_mdns_query(backend, &context, runtime);
+            forward_mdns_passthrough(backend, &context, runtime);
             return;
         }
         Err(error @ (mdns::MdnsError::Malformed | mdns::MdnsError::MalformedAt { .. })) => {
@@ -226,7 +223,7 @@ fn process_mdns_query_packet(
             questions = ?parsed.questions,
             "mDNS query passed through (no matching local rules)"
         );
-        forward_mdns_query(backend, &context, runtime);
+        forward_mdns_passthrough(backend, &context, runtime);
         return;
     }
 
@@ -243,7 +240,7 @@ fn process_mdns_query_packet(
         }
         Err(error) => {
             tracing::debug!(reason = ?error, "mDNS query passed through (forwarded)");
-            forward_mdns_query(backend, &context, runtime);
+            forward_mdns_passthrough(backend, &context, runtime);
             return;
         }
     };
@@ -273,7 +270,7 @@ fn process_mdns_query_packet(
         });
     let none_matched = candidates.is_empty();
 
-    if (!all_matched || none_matched) && !forward_mdns_query(backend, &context, runtime) {
+    if (!all_matched || none_matched) && !forward_mdns_passthrough(backend, &context, runtime) {
         return;
     }
 
@@ -320,6 +317,18 @@ fn forward_mdns_query(
             }
         },
     }
+}
+
+fn forward_mdns_passthrough(
+    backend: &dyn InterceptionBackend,
+    context: &FlowContext,
+    runtime: &RuntimeState,
+) -> bool {
+    let forwarded = forward_mdns_query(backend, context, runtime);
+    if forwarded {
+        runtime.record_passed_through();
+    }
+    forwarded
 }
 
 fn fail_mdns_open(
@@ -383,7 +392,7 @@ fn process_unicast_dns_packet(
         Ok(dns::QueryClassification::Eligible(question)) => question,
         Ok(dns::QueryClassification::UnsupportedQuestion) => {
             tracing::debug!("DNS query passed through (unsupported query type or class)");
-            reinject_or_log(backend, context, runtime);
+            reinject_passthrough_or_log(backend, context, runtime);
             return;
         }
         Err(error) => {
@@ -404,7 +413,7 @@ fn process_unicast_dns_packet(
             qtype = question.qtype,
             "DNS query passed through (no matching rule)"
         );
-        reinject_or_log(backend, context, runtime);
+        reinject_passthrough_or_log(backend, context, runtime);
         return;
     };
     if let Err(error) = dns::validate_query_sections(payload, &question) {
@@ -425,7 +434,7 @@ fn process_unicast_dns_packet(
                     qtype = question.qtype,
                     "DNS query passed through (record type mismatch)"
                 );
-                reinject_or_log(backend, context, runtime);
+                reinject_passthrough_or_log(backend, context, runtime);
                 return;
             }
             let contributing_rules = if rule.is_builtin {
@@ -457,7 +466,7 @@ fn process_unicast_dns_packet(
                     qtype = question.qtype,
                     "DNS query passed through (record type mismatch)"
                 );
-                reinject_or_log(backend, context, runtime);
+                reinject_passthrough_or_log(backend, context, runtime);
                 return;
             }
             let contributing_rules = if rule.is_builtin {
@@ -652,11 +661,24 @@ fn reinject_or_log(
     backend: &dyn InterceptionBackend,
     context: FlowContext,
     runtime: &RuntimeState,
-) {
+) -> bool {
     if let Err(error) = backend.reinject_original(context) {
         tracing::error!(%error, "failed to reinject original packet");
         runtime.record_error(error.to_string());
         runtime.record_fail_open();
+        false
+    } else {
+        true
+    }
+}
+
+fn reinject_passthrough_or_log(
+    backend: &dyn InterceptionBackend,
+    context: FlowContext,
+    runtime: &RuntimeState,
+) {
+    if reinject_or_log(backend, context, runtime) {
+        runtime.record_passed_through();
     }
 }
 
@@ -688,6 +710,7 @@ mod tests {
         forwarded: Mutex<Vec<Vec<u8>>>,
         raw_injected: Mutex<Vec<(Vec<u8>, bool)>>,
         fail_response: AtomicBool,
+        fail_reinjection: AtomicBool,
         fail_forward: AtomicBool,
         fail_forward_once: AtomicBool,
         forward_attempts: AtomicUsize,
@@ -715,6 +738,9 @@ mod tests {
         }
 
         fn reinject_original(&self, context: FlowContext) -> Result<(), BackendError> {
+            if self.fail_reinjection.load(Ordering::Relaxed) {
+                return Err(BackendError("mock reinjection failure".into()));
+            }
             self.reinjections
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -980,6 +1006,7 @@ mod tests {
         assert!(backend.reinjections.lock().unwrap().is_empty());
         let status = runtime.status();
         assert_eq!(status["overrides"], 1);
+        assert_eq!(status["passed_through"], 0);
         assert_eq!(status["fail_open"], 0);
         assert!(status.get("forwarded").is_none());
     }
@@ -1007,6 +1034,7 @@ mod tests {
         assert!(backend.responses.lock().unwrap().is_empty());
         let status = runtime.status();
         assert_eq!(status["overrides"], 0);
+        assert_eq!(status["passed_through"], 3);
         assert_eq!(status["fail_open"], 0);
         assert!(status.get("forwarded").is_none());
     }
@@ -1038,6 +1066,7 @@ mod tests {
             ]
         );
         assert!(backend.responses.lock().unwrap().is_empty());
+        assert_eq!(runtime.status()["passed_through"], 2);
         assert_eq!(runtime.status()["fail_open"], 0);
         assert_eq!(runtime.status()["errors"], 0);
     }
@@ -1053,7 +1082,26 @@ mod tests {
             vec![Some(wire_packet(&malformed))]
         );
         assert_eq!(runtime.status()["overrides"], 0);
+        assert_eq!(runtime.status()["passed_through"], 0);
         assert_eq!(runtime.status()["fail_open"], 1);
+    }
+
+    #[test]
+    fn failed_normal_dns_reinjection_does_not_count_as_passed_through() {
+        let (config, runtime) = runtime();
+        let backend = MockBackend::default();
+        backend.fail_reinjection.store(true, Ordering::Relaxed);
+
+        process_captured_packet(
+            &backend,
+            &config,
+            &runtime,
+            packet(Some(query(1, "other.example", 1, 1))),
+        );
+
+        assert_eq!(runtime.status()["passed_through"], 0);
+        assert_eq!(runtime.status()["fail_open"], 1);
+        assert_eq!(runtime.status()["errors"], 1);
     }
 
     #[test]
@@ -1879,6 +1927,7 @@ mod tests {
             assert_eq!(backend.forwarded.lock().unwrap().len(), 1);
             assert_eq!(backend.raw_injected.lock().unwrap().len(), 0);
             assert_eq!(runtime.status()["overrides"], 0);
+            assert_eq!(runtime.status()["passed_through"], 1);
         });
     }
 
@@ -1905,7 +1954,32 @@ mod tests {
             assert!(backend.reinjections.lock().unwrap().is_empty());
             assert_eq!(runtime.status()["fail_open"], 0);
             assert_eq!(runtime.status()["errors"], 0);
+            assert_eq!(runtime.status()["passed_through"], 1);
         });
+    }
+
+    #[test]
+    fn malformed_mdns_fail_open_is_not_counted_as_passed_through() {
+        let (_config, runtime) = runtime();
+        let backend = MockBackend::default();
+        run_mdns_test(|interfaces| {
+            let mut malformed = multi_query(0, &[("broken.local", 1, 1)]);
+            malformed[12] = 0x40;
+            let captured = mdns_packet(
+                5353,
+                IpAddr::V4(mdns::MDNS_IPV4_ADDR),
+                5353,
+                malformed,
+                255,
+                true,
+            );
+
+            super::process_captured_packet(&backend, &runtime, interfaces, captured);
+        });
+
+        assert_eq!(backend.forward_attempts.load(Ordering::Relaxed), 1);
+        assert_eq!(runtime.status()["passed_through"], 0);
+        assert_eq!(runtime.status()["fail_open"], 1);
     }
 
     #[test]
@@ -1965,6 +2039,7 @@ mod tests {
                 assert!(backend.reinjections.lock().unwrap().is_empty());
                 assert_eq!(runtime.status()["fail_open"], 0);
                 assert_eq!(runtime.status()["errors"], 0);
+                assert_eq!(runtime.status()["passed_through"], 1);
             }
         });
 
@@ -1986,6 +2061,7 @@ mod tests {
         assert_eq!(*backend.forwarded.lock().unwrap(), vec![original]);
         assert!(backend.reinjections.lock().unwrap().is_empty());
         assert_eq!(runtime.status()["errors"], 0);
+        assert_eq!(runtime.status()["passed_through"], 1);
     }
 
     #[test]
@@ -2010,6 +2086,7 @@ mod tests {
         assert!(backend.reinjections.lock().unwrap().is_empty());
         assert_eq!(runtime.status()["fail_open"], 1);
         assert_eq!(runtime.status()["errors"], 1);
+        assert_eq!(runtime.status()["passed_through"], 0);
     }
 
     #[test]
@@ -2039,6 +2116,7 @@ mod tests {
             assert_eq!(info.answers.len(), 1);
             assert_eq!(info.answers[0].owner(), "matched.local");
             assert_eq!(runtime.status()["overrides"], 1);
+            assert_eq!(runtime.status()["passed_through"], 1);
         });
     }
 
@@ -2162,6 +2240,7 @@ mod tests {
             let raw = backend.raw_injected.lock().unwrap();
             assert_eq!(raw.len(), 1);
             assert_eq!(runtime.status()["overrides"], 1);
+            assert_eq!(runtime.status()["passed_through"], 1);
         });
     }
 

@@ -53,9 +53,8 @@ directory:
 
 The script builds the `x86_64-pc-windows-msvc` release, downloads or reuses the
 pinned WinDivert 2.2.2 x64 archive, checks its SHA-256 and driver signature,
-then compiles `dist\DNS-Shunt-Setup-<version>.exe` (currently
-`DNS-Shunt-Setup-0.2.1.exe`). Staged files and the archive cache are isolated
-under `dist\`; the workflow does not modify
+then compiles `dist\DNS-Shunt-Setup-[version].exe`. Staged files and the archive
+cache are isolated under `dist\`; the workflow does not modify
 `target\debug`/`target\release` runtime assets or stop an active WinDivert
 driver.
 
@@ -152,18 +151,20 @@ shared `%ProgramData%\dns-shunt\rules\rules.json` and
 delete rules immediately. Rules can be A overrides (`type: "A"`, `address`), AAAA
 overrides (`type: "AAAA"`, `address`), or CNAME aliases (`type: "CNAME"`,
 `target`); legacy JSON entries containing only `name`, `address`, and `ttl` load
-as A or AAAA rules depending on the address family. Exact names win; otherwise,
-the most-specific matching wildcard wins. Wildcards match subdomains but not
-their apex. A and AAAA rules for the same name and wildcard can coexist. A rules
-answer A/IN queries only (QTYPE 1); AAAA rules answer AAAA/IN queries only (QTYPE
-28). If a domain has a rule for one address family but not the other, queries
-for the unconfigured family pass through to upstream resolvers unchanged
-(fail-open). CNAME rules answer A, AAAA, and explicit CNAME/IN queries. For A
-lookups, DNS Shunt includes a local CNAME chain and terminal A record when the
-target matches a local A rule. For AAAA lookups, DNS Shunt includes a local CNAME
-chain and terminal AAAA record when the target matches a local AAAA rule. If the
-terminal target only has a rule for the other address family, the CNAME chain
-alone is returned to the querier, leaving target resolution to upstream resolvers.
+as A or AAAA rules depending on the address family. An exact-name rule shadows
+wildcard rules for every query type, even if its record type does not match the
+query; in that case, the query passes through instead of falling back to a
+wildcard. Otherwise, the most-specific matching wildcard wins. Wildcards match
+subdomains but not their apex. A and AAAA rules for the same name and wildcard
+can coexist. A rules answer A/IN queries only (QTYPE 1); AAAA rules answer
+AAAA/IN queries only (QTYPE 28). Queries without a matching address-family rule
+pass through to upstream resolvers unchanged (fail-open). CNAME rules answer A,
+AAAA, and explicit CNAME/IN queries. For A lookups, DNS Shunt includes a local
+CNAME chain and terminal A record when the target has a local A rule. For AAAA
+lookups, it includes a local CNAME chain and terminal AAAA record when the
+target has a local AAAA rule. If the terminal target only has a rule for the
+other family, DNS Shunt returns only the CNAME chain; the target is left for
+upstream resolution.
 Explicit CNAME questions receive only the queried alias's CNAME record. If a
 chain reaches an unruled target, DNS Shunt returns the known chain and does not
 query upstream; clients may issue a target lookup through the unchanged resolver
@@ -179,11 +180,14 @@ The JSON store is validated in full before it is persisted and published.
 CNAME targets must be concrete DNS names, and configured chains that resolve
 back into a CNAME loop are rejected.
 Corrupt or unreadable stores fail startup rather than silently disabling
-overrides. Aggregate override, fail-open, and error counters, uptime, and
-per-rule hit counts cover only the current run and are not written to disk;
-query names are not part of those statistics. Debug-level packet logs include
-DNS and mDNS question names; service logs remain on disk until pruned. TTL, GUI
-name, and HTTP port remain read-only TOML settings.
+overrides. Aggregate override, passed-through, fail-open, and error counters,
+uptime, and per-rule hit counts cover only the current run and are not written
+to disk. Passed-through counts DNS requests successfully reinjected unchanged
+and mDNS requests successfully forwarded when local rules did not fully handle
+them; exceptional fail-open recovery is excluded. Query names are not part of
+those statistics. Debug-level packet logs include DNS and mDNS question names;
+service logs remain on disk until pruned. TTL, GUI name, and HTTP port remain
+read-only TOML settings.
 
 ## Windows Service
 
